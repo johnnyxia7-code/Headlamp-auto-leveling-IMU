@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import typing
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -207,18 +208,21 @@ class Config:
         return dataclasses.asdict(self)
 
 
-def _build(cls, values: Optional[Dict[str, Any]]):
+def _build(cls, values: Optional[Dict[str, Any]], strict: bool = True):
     values = values or {}
     names = {f.name: f for f in dataclasses.fields(cls)}
     unknown = set(values) - set(names)
     if unknown:
-        raise KeyError(f"unknown {cls.__name__} keys: {sorted(unknown)}")
+        if strict:
+            raise KeyError(f"unknown {cls.__name__} keys: {sorted(unknown)}")
+        warnings.warn(f"ignoring unknown {cls.__name__} keys: {sorted(unknown)}")
+        values = {k: v for k, v in values.items() if k in names}
     hints = typing.get_type_hints(cls)
     kwargs = {}
     for name, v in values.items():
         hint = hints[name]
         if dataclasses.is_dataclass(hint):
-            kwargs[name] = _build(hint, v)
+            kwargs[name] = _build(hint, v, strict)
         elif isinstance(v, list) and v and isinstance(v[0], list):
             kwargs[name] = [tuple(x) for x in v]
         elif isinstance(v, list) and typing.get_origin(hint) is tuple:
@@ -228,8 +232,10 @@ def _build(cls, values: Optional[Dict[str, Any]]):
     return cls(**kwargs)
 
 
-def config_from_dict(d: Optional[Dict[str, Any]]) -> Config:
-    return _build(Config, d)
+def config_from_dict(d: Optional[Dict[str, Any]], strict: bool = True) -> Config:
+    """Build a Config. ``strict=False`` drops unknown keys with a warning, so checkpoints
+    saved by an older version (whose config had since-removed fields) still load."""
+    return _build(Config, d, strict)
 
 
 def load_config(path: Optional[str | Path] = None) -> Config:

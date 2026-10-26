@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from headlamp_leveling import CHANNELS
-from headlamp_leveling.config import Config, load_config
+from headlamp_leveling.config import Config, config_from_dict, load_config
 from headlamp_leveling.data.dataset import WindowDataset
 from headlamp_leveling.data.features import FEATURES
 from headlamp_leveling.data.generate import generate_dataset, simulate_split
@@ -36,6 +36,10 @@ def test_config_roundtrip(tmp_path):
     p.write_text("dataset:\n  windw_s: 12\n")
     with pytest.raises(KeyError):
         load_config(p)
+    # Checkpoints from older versions may carry removed keys: lenient mode drops them.
+    with pytest.warns(UserWarning):
+        cfg = config_from_dict({"fusion": {"removed_key": 1.0}, "dataset": {"window_s": 12}}, strict=False)
+    assert cfg.dataset.window_s == 12
 
 
 def test_tripset_save_load(tmp_path, small_cfg):

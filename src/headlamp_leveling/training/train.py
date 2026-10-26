@@ -137,7 +137,7 @@ def train(cfg: Config, data_dir: Optional[str] = None, out_dir: Optional[str] = 
 
 def load_checkpoint(path: str | Path, device: str = "cpu") -> Dict:
     ckpt = torch.load(path, map_location=device, weights_only=False)
-    cfg = config_from_dict(ckpt["config"])
+    cfg = config_from_dict(ckpt["config"], strict=False)
     model = build_model(ckpt["arch"], ckpt["in_ch"], cfg.model)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
