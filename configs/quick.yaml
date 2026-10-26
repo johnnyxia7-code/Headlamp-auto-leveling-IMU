@@ -1,0 +1,13 @@
+# Small, fast configuration for smoke tests and CI (~1-2 min on a laptop CPU).
+sim:
+  trip_duration_s: 300.0
+dataset:
+  out_dir: data/quick
+  n_train_trips: 60
+  n_val_trips: 15
+  n_test_trips: 15
+  stride_s: 5.0
+train:
+  out_dir: runs/quick
+  epochs: 3
+  batch_size: 64
