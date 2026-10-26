@@ -1,0 +1,73 @@
+# Default configuration. Every key is optional: missing keys fall back to the
+# defaults in src/headlamp_leveling/config.py. Ranges [lo, hi] are sampled
+# uniformly per simulated trip (domain randomisation).
+
+sim:
+  fs_hz: 100.0              # IMU / simulation rate
+  decimation: 5             # model input rate = 20 Hz
+  trip_duration_s: 240.0
+  max_speed_kmh: 130.0
+  load_change_prob: 0.3     # passengers / luggage change at one stop
+  grade_classes:            # [name, max |grade| %, probability]
+    - [flat, 1.0, 0.25]
+    - [rolling, 5.0, 0.40]
+    - [hilly, 10.0, 0.30]
+    - [mountain, 14.0, 0.05]
+  roughness_classes:        # ISO 8608 [name, Gd(n0) m^3, probability]
+    - [A, 1.6e-5, 0.45]
+    - [B, 6.4e-5, 0.40]
+    - [C, 2.56e-4, 0.15]
+
+vehicle:
+  wheelbase_m: [2.45, 3.10]
+  front_axle_rate_kn_m: [38.0, 60.0]
+  rear_axle_rate_kn_m: [34.0, 62.0]
+  pitch_gradient_deg_per_g: [1.2, 4.0]   # squat / dive under accel / braking
+  pitch_freq_hz: [1.1, 1.8]
+  pitch_damping: [0.25, 0.55]
+  passenger_mass_kg: [45.0, 110.0]
+  trunk_mass_kg: [10.0, 180.0]
+  tongue_load_kg: [25.0, 100.0]
+
+imu:                        # automotive-grade 6-axis MEMS
+  accel_noise_ug_rthz: 150.0
+  accel_bias_mg: 15.0
+  gyro_bias_dps: 0.3
+  misalign_deg: 0.05        # residual after end-of-line calibration
+  vibration_ms2: 0.15
+  tyre_radius_err: 0.015
+
+dataset:
+  out_dir: data/sim
+  n_train_trips: 600        # ~40 h of driving
+  n_val_trips: 100
+  n_test_trips: 100
+  window_s: 30.0
+  stride_s: 3.0
+  seed: 7
+
+model:
+  arch: tcn                 # tcn | gru | hybrid
+  channels: [32, 48, 64, 64]
+  kernel_size: 5
+  dropout: 0.1
+
+train:
+  out_dir: runs/default
+  epochs: 40
+  batch_size: 128
+  lr: 0.002
+  huber_delta_deg: 0.2
+  aux_grade_weight: 0.1
+  patience: 10
+  device: auto
+
+control:
+  update_period_s: 1.0
+  min_excitation_ms2: 0.25
+  filter_tau_s: 20.0
+  deadband_deg: 0.05
+  max_rate_deg_s: 0.5
+  range_deg: [-1.0, 3.0]
+  failsafe_deg: 0.0
+  steps_per_deg: 40.0
