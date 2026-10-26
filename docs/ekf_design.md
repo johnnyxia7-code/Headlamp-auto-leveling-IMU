@@ -232,10 +232,23 @@ would be explained as body pitch.
 - **Innovation gating.** Each scalar update computes `NIS = ν²/S`. Camera and NN
   measurements use the χ²(1) 99.9 % gate (10.8). The IMU and wheel speed use a
   loose gate (30) that only rejects gross errors.
-- **Fault detection.** An exponential moving average of NIS per sensor (5 s window)
-  above 9 sets a fault flag. The controller then moves to the fail-safe position
-  and latches there. `tests/test_fusion.py` injects a gyro stuck at +20 °/s and
-  checks that it is flagged.
+- **Fault detection.** Each sensor keeps an exponential moving average of its NIS
+  over a 5 s window. Before averaging, every sample is capped at 25, so a single
+  transient cannot trip the monitor: a drive-away, a pothole or an outlier frame.
+  An average above 9 sets a fault flag. Monitoring starts only after a 30 s
+  warm-up, while the filter is still converging.
+- **Fault classes.**
+  - *Critical:* `acc_x`, `acc_z`, gyro and wheel speed. A fault here sets
+    `critical_fault`. The controller then moves to the fail-safe position and
+    latches there.
+  - *Auxiliary:* camera and NN. A fault here only disables that input; the IMU and
+    wheel-speed filter carries on.
+
+  `tests/test_fusion.py` injects a gyro stuck at +20 °/s and checks that it is
+  flagged. Earlier versions had no warm-up and no cap, and they let a camera fault
+  latch the fail-safe. In those versions, false faults fired on 7 of 40 test trips;
+  in one trip the lamp was parked at the fail-safe position, giving a 1.18°
+  closed-loop error. Since the fix, no test trip shows a false fault.
 - **Numerical safety.** Updates are sequential and scalar, so no matrix inversion
   is needed. After each update the covariance is symmetrised.
 - **Controller interface.** The controller uses the EKF estimate directly whenever

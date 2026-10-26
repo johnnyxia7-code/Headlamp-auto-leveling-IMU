@@ -82,6 +82,8 @@ N_STATES = 13
 V, A, GAM, GAMR, THS, THD, THDR, KP, BAX, BAZ, BGY, SW, BCAM = range(N_STATES)
 STATE_NAMES = ("v", "a", "gam", "gamr", "ths", "thd", "thdr", "kp", "bax", "baz", "bgy", "sw", "bcam")
 SENSORS = ("acc_x", "acc_z", "gyro", "wheel", "camera", "nn")
+CRITICAL_SENSORS = ("acc_x", "acc_z", "gyro", "wheel")   # a fault here -> lamp fail-safe
+AUX_SENSORS = ("camera", "nn")                            # a fault here -> input disabled
 
 D2R = np.pi / 180.0
 MG = 1e-3 * G
@@ -170,6 +172,11 @@ class EkfOutput:
     standstill: bool
     faults: Dict[str, bool] = field(default_factory=dict)
 
+    @property
+    def critical_fault(self) -> bool:
+        """IMU or wheel-speed fault: the estimate cannot be trusted, use the fail-safe aim."""
+        return any(self.faults.get(s, False) for s in CRITICAL_SENSORS)
+
 
 class PitchEKF:
     def __init__(self, cfg: FusionConfig):
@@ -213,6 +220,7 @@ class PitchEKF:
         self._noise_var = np.array([c.r_accel_x, c.r_accel_z, c.r_gyro_dps * D2R]) ** 2
         self.nis_ema = {s: 1.0 for s in SENSORS}
         self.faults = {s: False for s in SENSORS}
+        self._time = 0.0
 
     def _initialize(self, ax: float, az: float) -> None:
         # Linearisation point for the grade from the first accelerometer sample.
@@ -292,9 +300,11 @@ class PitchEKF:
         S = float(H @ PHt) + R
         nu = z - h
         nis = nu * nu / S
-        if sensor in self.nis_ema:
+        if sensor in self.nis_ema and self._time >= self.cfg.fault_warmup_s:
+            # Capped samples: a short transient (drive-away, pothole, outlier frame) cannot
+            # trip the monitor on its own; a persistent inconsistency can.
             alpha = min(1.0, 1.0 / (self.cfg.fault_window_s * self.cfg.fs_hz))
-            self.nis_ema[sensor] += alpha * (min(nis, 100.0) - self.nis_ema[sensor])
+            self.nis_ema[sensor] += alpha * (min(nis, self.cfg.fault_nis_cap) - self.nis_ema[sensor])
             self.faults[sensor] = self.nis_ema[sensor] > self.cfg.fault_nis
         if gate is not None and nis > gate:
             return False
@@ -349,6 +359,8 @@ class PitchEKF:
 
     def update_load_pitch(self, pitch_deg: float, std_deg: float, sensor: str = "nn") -> bool:
         """Direct measurement of the static load pitch, e.g. from the neural window estimator."""
+        if self.faults.get(sensor, False):
+            return False
         H = np.zeros(N_STATES)
         H[THS] = 1.0
         return self.update_scalar(sensor, pitch_deg * D2R, self.x[THS], H, (std_deg * D2R) ** 2,
@@ -364,6 +376,7 @@ class PitchEKF:
         provide the roll angle used in the vertical-accelerometer model.
         """
         c = self.cfg
+        self._time += dt
         if np.isfinite(ay) and np.isfinite(gz_dps):
             a_lat = v_wheel * gz_dps * D2R
             self.roll = float(np.arcsin(np.clip((ay - a_lat) / G, -0.3, 0.3)))
@@ -388,7 +401,7 @@ class PitchEKF:
         self.update_gyro(gy_dps)
         if not (self._tilt_pending and not self._load_event):
             self.update_accel(ax, az)
-        if c.use_camera and np.isfinite(camera_pitch_deg):
+        if c.use_camera and np.isfinite(camera_pitch_deg) and not self.faults["camera"]:
             self.update_camera(camera_pitch_deg)
         return self.output()
 

@@ -70,7 +70,7 @@ def run_ekf(raw: Dict[str, np.ndarray], cfg: Config, use_camera: Optional[bool] 
         for key in keys:
             out[key][k] = getattr(o, key)
         out["standstill"][k] = o.standstill
-        out["fault"][k] = any(o.faults.values())
+        out["fault"][k] = o.critical_fault
     out["fs_hz"] = fs
     out["true_load_pitch_deg"] = raw["load_pitch_deg"][idx].astype(np.float64)
     out["true_road_grade_deg"] = raw["road_grade_deg"][idx].astype(np.float64)

@@ -185,7 +185,9 @@ class FusionConfig:
     gate_camera: float = 10.83             # chi^2(1) 99.9 %
     gate_imu: float = 30.0
     fault_nis: float = 9.0                 # mean NIS over the window that flags a sensor fault
+    fault_nis_cap: float = 25.0            # per-sample cap so single transients cannot trip it
     fault_window_s: float = 5.0
+    fault_warmup_s: float = 30.0           # no fault evaluation while the filter converges
 
 
 @dataclass
