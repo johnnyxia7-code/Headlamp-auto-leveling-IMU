@@ -65,7 +65,7 @@ def closed_loop(trips: TripSet, estimator: Estimator, window: int, cfg) -> Dict[
             out = ctrl.update(dt, est[k], exc[k], standstill, tilt)
             err = float(tr["load_pitch_deg"][e] - out.correction_deg)
             errors.append(err)
-            if e / fs >= 60.0:
+            if e >= window - 1:
                 errors_warm.append(err)
     errors, errors_warm = np.abs(errors), np.abs(errors_warm)
 
@@ -74,7 +74,7 @@ def closed_loop(trips: TripSet, estimator: Estimator, window: int, cfg) -> Dict[
                 "within_0.2deg": float(np.mean(a <= 0.2)),
                 "within_0.25percent": float(np.mean(a <= 0.25 * DEG_PER_PERCENT)),
                 "within_0.5percent": float(np.mean(a <= 0.5 * DEG_PER_PERCENT))}
-    return {"all": stats(errors), "after_60s": stats(errors_warm)}
+    return {"all": stats(errors), "after_first_window": stats(errors_warm)}
 
 
 def evaluate(ckpt_path: str, data_dir: Optional[str] = None, out_dir: Optional[str] = None,
@@ -129,8 +129,8 @@ def evaluate(ckpt_path: str, data_dir: Optional[str] = None, out_dir: Optional[s
         print(f"[eval] model   (excited) {format_metrics(wl['model_excited'])}")
         print(f"[eval] physics (excited) {format_metrics(wl['physics_excited'])}")
         for name, r in report["closed_loop"].items():
-            a = r["after_60s"]
-            print(f"[eval] closed loop {name:8s} after 60 s: MAE={a['mae_deg']:.3f} deg P95={a['p95_deg']:.3f} "
+            a = r["after_first_window"]
+            print(f"[eval] closed loop {name:8s} after 1st window: MAE={a['mae_deg']:.3f} deg P95={a['p95_deg']:.3f} "
                   f"|aim err|<=0.25%: {100 * a['within_0.25percent']:.1f}%")
         print(f"[eval] report -> {out / 'report.md'}")
     return report

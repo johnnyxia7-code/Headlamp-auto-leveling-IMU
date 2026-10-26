@@ -74,7 +74,7 @@ def test_standstill_accelerometer_sees_grade_plus_load_pitch():
     cfg = _ideal_cfg(trip_duration_s=30.0)
     trip = simulate_trip(cfg, 3)
     x = trip["inputs"]
-    k = 10  # first samples: vehicle starts at standstill
+    k = 5  # first samples: vehicle starts at standstill (>= 2 s)
     tilt = np.rad2deg(np.arctan2(x[:k, IDX["ax"]].mean(), x[:k, IDX["az"]].mean()))
     expected = trip["road_grade_deg"][0] + trip["load_pitch_deg"][0]
     assert tilt == pytest.approx(expected, abs=0.02)
@@ -83,11 +83,11 @@ def test_standstill_accelerometer_sees_grade_plus_load_pitch():
 
 @pytest.mark.parametrize("seed", [1, 2])
 def test_physics_estimator_recovers_pitch_with_ideal_sensors(seed):
-    cfg = _ideal_cfg(trip_duration_s=180.0)
+    cfg = _ideal_cfg(trip_duration_s=400.0)
     trip = simulate_trip(cfg, seed)
     feats = build_features(trip["inputs"], cfg.model_fs_hz)
     est = PhysicsEstimator(cfg.model_fs_hz, min_excitation_ms2=0.3)
-    W = int(30 * cfg.model_fs_hz)
+    W = int(120 * cfg.model_fs_hz)
     errs = []
     for e in range(W - 1, len(feats), W // 2):
         p = est.estimate(feats[e - W + 1:e + 1])

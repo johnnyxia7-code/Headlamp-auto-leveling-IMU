@@ -18,8 +18,8 @@ import yaml
 @dataclass
 class SimConfig:
     fs_hz: float = 100.0                 # internal simulation / IMU sample rate
-    decimation: int = 5                  # model input rate = fs_hz / decimation
-    trip_duration_s: float = 240.0
+    decimation: int = 20                 # model input rate = fs_hz / decimation = 5 Hz
+    trip_duration_s: float = 600.0
     max_speed_kmh: float = 130.0
     # Road grade classes sampled per trip: (name, max |grade| in percent, probability)
     grade_classes: List[Tuple[str, float, float]] = field(default_factory=lambda: [
@@ -72,11 +72,11 @@ class ImuConfig:
 @dataclass
 class DatasetConfig:
     out_dir: str = "data/sim"
-    n_train_trips: int = 600
-    n_val_trips: int = 100
-    n_test_trips: int = 100
-    window_s: float = 30.0
-    stride_s: float = 3.0
+    n_train_trips: int = 400
+    n_val_trips: int = 80
+    n_test_trips: int = 80
+    window_s: float = 120.0              # long windows: the load signal needs several accel/brake events
+    stride_s: float = 5.0
     seed: int = 7
     workers: int = 0                      # 0 = use all CPUs
 

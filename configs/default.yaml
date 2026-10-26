@@ -4,8 +4,8 @@
 
 sim:
   fs_hz: 100.0              # IMU / simulation rate
-  decimation: 5             # model input rate = 20 Hz
-  trip_duration_s: 240.0
+  decimation: 20            # model input rate = 5 Hz
+  trip_duration_s: 600.0
   max_speed_kmh: 130.0
   load_change_prob: 0.3     # passengers / luggage change at one stop
   grade_classes:            # [name, max |grade| %, probability]
@@ -39,11 +39,11 @@ imu:                        # automotive-grade 6-axis MEMS
 
 dataset:
   out_dir: data/sim
-  n_train_trips: 600        # ~40 h of driving
-  n_val_trips: 100
-  n_test_trips: 100
-  window_s: 30.0
-  stride_s: 3.0
+  n_train_trips: 400        # ~67 h of driving
+  n_val_trips: 80
+  n_test_trips: 80
+  window_s: 120.0
+  stride_s: 5.0
   seed: 7
 
 model:

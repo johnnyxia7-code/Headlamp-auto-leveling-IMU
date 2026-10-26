@@ -17,10 +17,10 @@ from headlamp_leveling.models import build_model
 @pytest.fixture(scope="module")
 def small_cfg(tmp_path_factory):
     cfg = Config()
-    cfg.sim.trip_duration_s = 90.0
+    cfg.sim.trip_duration_s = 150.0
     cfg.dataset.out_dir = str(tmp_path_factory.mktemp("data"))
     cfg.dataset.n_train_trips, cfg.dataset.n_val_trips, cfg.dataset.n_test_trips = 6, 2, 2
-    cfg.dataset.window_s, cfg.dataset.stride_s = 20.0, 5.0
+    cfg.dataset.window_s, cfg.dataset.stride_s = 60.0, 10.0
     cfg.dataset.workers = 1
     cfg.train.out_dir = str(tmp_path_factory.mktemp("run"))
     cfg.train.epochs, cfg.train.batch_size = 1, 16
@@ -50,7 +50,7 @@ def test_tripset_save_load(tmp_path, small_cfg):
 def test_window_dataset(small_cfg):
     ts = simulate_split(small_cfg, 2, np.random.SeedSequence(1), workers=1)
     W = int(small_cfg.dataset.window_s * ts.fs_hz)
-    ds = WindowDataset(ts, W, 50)
+    ds = WindowDataset(ts, W, 25)
     x, y, exc = ds[0]
     assert x.shape == (len(FEATURES), W) and y.shape == (2,)
     assert torch.isfinite(x).all() and exc >= 0
@@ -76,7 +76,7 @@ def test_end_to_end_train_evaluate_export(small_cfg, tmp_path):
     assert "model" in report["closed_loop"]
     paths = export(str(ckpt), str(tmp_path / "exp"), onnx=False, verbose=False)
     ts_model = torch.jit.load(paths["torchscript"])
-    assert ts_model(torch.zeros(1, len(FEATURES), int(small_cfg.dataset.window_s * 20))).shape == (1, 2)
+    assert ts_model(torch.zeros(1, len(FEATURES), int(small_cfg.dataset.window_s * small_cfg.model_fs_hz))).shape == (1, 2)
 
 
 def test_ride_height_label_sign():
@@ -92,7 +92,7 @@ def test_load_csv_log(tmp_path):
         w.writerow(("t",) + CHANNELS + ("h_front_mm", "h_rear_mm"))
         for ti in t:
             w.writerow([ti, 0.1, 0.0, 9.8, 0.0, 0.0, 0.0, 10.0, 400.0, 390.0])
-    trip = load_log(p, 20.0, wheelbase_m=2.7, h_ref_front_mm=400.0, h_ref_rear_mm=400.0)
+    trip = load_log(p, 5.0, wheelbase_m=2.7, h_ref_front_mm=400.0, h_ref_rear_mm=400.0)
     assert trip["inputs"].shape[1] == len(CHANNELS)
-    assert trip["inputs"].shape[0] == pytest.approx(60 * 20, abs=2)
+    assert trip["inputs"].shape[0] == pytest.approx(60 * 5, abs=2)
     assert np.allclose(trip["load_pitch_deg"], np.rad2deg(np.arctan2(0.01, 2.7)), atol=1e-6)
