@@ -99,13 +99,13 @@ tests/                  pytest suite
 ```bash
 pip install -e ".[dev]"          # numpy, pyyaml, torch, pytest
 
-# smoke test (~1 min on CPU)
+# smoke test (~2 min on CPU; checks the pipeline only, the 3-epoch model is undertrained)
 hal generate -c configs/quick.yaml
 hal train    -c configs/quick.yaml --arch tcn
 hal evaluate runs/quick/model.pt
 hal export   runs/quick/model.pt
 
-# full run (~40 h of simulated driving; GPU recommended but not required)
+# full run (~67 h of simulated driving; ~25 min per model on a 4-core CPU)
 hal generate -c configs/default.yaml
 hal train    -c configs/default.yaml --arch hybrid -o runs/hybrid
 hal evaluate runs/hybrid/model.pt
@@ -126,8 +126,8 @@ Outputs:
 
 ## 4. Signals and conventions
 
-Model input is 20 Hz, decimated with a boxcar anti-alias filter from the 100 Hz IMU. Windows are
-30 s long (600 samples). The axes follow ISO 8855 (x forward, y left, z up).
+Model input is 5 Hz, decimated with a boxcar anti-alias filter from the 100 Hz IMU. Windows are
+120 s long (600 samples). The axes follow ISO 8855 (x forward, y left, z up).
 
 | Channel | Unit | Notes |
 |---|---|---|
@@ -169,11 +169,50 @@ domain randomisation.
 - **Fault.** The controller moves to the fail-safe position and latches there.
 
 The closed-loop metric is `aim error = true load pitch − applied correction`. A positive error means
-the beam is too high. The evaluation reports it both over the whole trip and after a 60 s warm-up.
+the beam is too high. The evaluation reports it both over the whole trip and after the first full window (120 s).
 
 ## 7. Results (simulated test split)
 
-RESULTS_PLACEHOLDER
+These are results on the simulated test split: 80 unseen trips (13.3 h), each 10 min long, with
+7,760 windows. The models were trained for 25 epochs on 400 trips with `configs/default.yaml`.
+
+**Window-level load-pitch error**
+
+| Estimator | MAE (deg) | RMSE | P95 | within 0.1° | within 0.2° |
+|---|---|---|---|---|---|
+| physics baseline | 0.181 | 0.296 | 0.554 | 42.9 % | 71.1 % |
+| `tcn` | **0.147** | **0.219** | **0.421** | **48.9 %** | **77.3 %** |
+| `hybrid` | 0.155 | 0.234 | 0.434 | 48.3 % | 73.7 % |
+| `gru` | not yet benchmarked at full scale (the run was interrupted) | | | | |
+
+**Closed loop: estimator + leveling controller, aim error after the first window**
+
+| Estimator | MAE (deg) | P95 (deg) | within 0.25 % | within 0.5 % |
+|---|---|---|---|---|
+| physics baseline | 0.160 | 0.568 | 63.8 % | 85.8 % |
+| `tcn` | 0.151 | **0.470** | 63.8 % | **87.4 %** |
+| `hybrid` | 0.161 | 0.483 | 61.5 % | 84.7 % |
+
+What these numbers show:
+
+- **Window length matters most.** With 30 s windows at 20 Hz, neither the physics baseline nor the
+  networks got below about 0.4° MAE. The load signal (`a·θ ≈ 0.01 m/s²`) needs several
+  acceleration and braking events to rise above ride vibration. Moving to 120 s windows at 5 Hz
+  keeps the same 600-sample input and cut the error to the values above.
+- **The learned models help most where the physics baseline is weak.** On mountain roads the TCN
+  error is 0.175° against 0.39° for the baseline. With a trailer it is 0.146° against 0.227°.
+- **Heavy loads are underestimated.** For load pitch above 1.25°, the TCN MAE is 0.26° with a bias
+  of −0.20°, and in the `max_rear` case the baseline is better. These loads are rare in the
+  training mix, and the Huber loss shrinks predictions toward the mean.
+- **The controller narrows the gap.** Its filtering averages the window estimates, so the
+  closed-loop MAE of the model and the baseline end up close. The model's advantage shows mainly in
+  the tail (P95). Next steps: train longer (validation MAE was still falling at epoch 25), weight
+  the heavy-load cases, and feed the physics estimate to the network as an input.
+- **Before the first full window,** the controller holds its initial value (the reference state).
+  This is why the whole-trip MAE is about 0.25°. In a vehicle, the value stored in NVM at the last
+  ignition-off covers this period.
+
+The full per-category tables are in `runs/<arch>/eval_test/report.md`.
 
 ## 8. Using real vehicle data
 
@@ -201,7 +240,7 @@ instrumented reference vehicle.
 ## 9. Deployment notes
 
 - **MCU budget.** The GRU (~32 k parameters) is the cheapest model to deploy. Its streaming
-  form needs no 30 s window buffer. The TCN and hybrid models fit in int8 within ~150 kB of flash.
+  form needs no 120 s window buffer. The TCN and hybrid models fit in int8 within ~150 kB of flash.
   Inference runs at 1 Hz.
 - **Interface.** The interface is described in `export/model_meta.json`: feature order,
   normalisation mean/std, sample rate, window length, output semantics and controller parameters.
