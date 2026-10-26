@@ -5,9 +5,9 @@ __pycache__/
 venv/
 .pytest_cache/
 # generated datasets and training outputs
-data/
-runs/
-exports/
+/data/
+/runs/
+/exports/
 *.npz
 *.pt
 *.onnx
