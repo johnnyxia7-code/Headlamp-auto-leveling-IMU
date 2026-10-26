@@ -45,9 +45,13 @@ def drive_cycle(rng: np.random.Generator, n: int, dt: float, max_speed_kmh: floa
         decel_lim = rng.uniform(0.8, 4.0) if rng.random() > 0.08 else rng.uniform(5.0, 8.5)
         k_track = rng.uniform(0.3, 0.8)
 
-        # Track the target speed.
-        while i < n and abs(v_tgt - v_now) > 0.3:
+        # Track the target speed. A stop is braked all the way to v = 0 with a minimum
+        # deceleration, so speed never jumps to zero (no spurious acceleration spike).
+        stopping = v_tgt == 0.0
+        while i < n and (v_now > 0.0 if stopping else abs(v_tgt - v_now) > 0.3):
             a_dem = np.clip(k_track * (v_tgt - v_now) * 2.0, -decel_lim, accel_lim)
+            if stopping:
+                a_dem = min(a_dem, -0.6)
             a_now += np.clip(a_dem - a_now, -jerk_max * dt, jerk_max * dt)
             v_now = max(0.0, v_now + a_now * dt)
             if v_now == 0.0:

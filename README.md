@@ -89,8 +89,12 @@ src/headlamp_leveling/
   training/train.py     training loop, checkpointing
   training/evaluate.py  window metrics, breakdowns, closed-loop aim error
   control/leveling.py   leveling controller
+  sim/camera.py         front camera as auxiliary pitch sensor (lane vanishing point)
+  fusion/ekf.py         13-state EKF: IMU + wheel speed + camera (+ NN) -> load pitch with sigma
+  fusion/run.py         run the EKF on simulated trips, `hal fuse-eval`
   export.py             TorchScript / ONNX / metadata export
   cli.py                `hal` command line
+docs/ekf_design.md      EKF specification: states, models, Jacobians, tuning, embedded notes
 tests/                  pytest suite
 ```
 
@@ -171,7 +175,50 @@ domain randomisation.
 The closed-loop metric is `aim error = true load pitch − applied correction`. A positive error means
 the beam is too high. The evaluation reports it both over the whole trip and after the first full window (120 s).
 
-## 7. Results (simulated test split)
+## 7. Sensor fusion EKF (IMU + wheel speed + camera)
+
+`fusion/ekf.py` estimates the load pitch with a 13-state extended Kalman filter instead of
+fixed windows. The full specification, with models, Jacobians, tuning rationale and embedded
+notes, is in [`docs/ekf_design.md`](docs/ekf_design.md).
+
+- **States:**
+  - speed and acceleration;
+  - road grade and grade rate;
+  - static load pitch;
+  - dynamic pitch and pitch rate, plus the online pitch gradient;
+  - accelerometer x/z and gyro biases;
+  - tyre-radius scale;
+  - camera mounting bias.
+- **Measurements, as sequential scalar updates:**
+  - accelerometer x/z, with roll compensated from `ay − v·yaw_rate`;
+  - gyro pitch rate;
+  - wheel speed;
+  - camera pitch to the road plane at 30 m look-ahead, with grade-change compensation;
+  - optionally, the neural window estimate as a direct load-pitch measurement.
+- **Robustness:**
+  - measurement noise adapted online, so the filter copes with road roughness varying ~10×;
+  - innovation gating against camera outliers;
+  - per-sensor NIS fault flags;
+  - zero-velocity updates at standstill, with the grade frozen there;
+  - event-triggered load-change tracking at standstill, with a delayed decision so a
+    drive-away isn't mistaken for loading;
+  - covariance re-opened at drive-away.
+- **Controller interface:** the controller accepts the EKF estimate whenever its σ ≤ 0.3°.
+
+```bash
+hal fuse-eval -c configs/default.yaml -n 40 -o runs/fusion                     # EKF with / without camera
+hal fuse-eval -c configs/default.yaml -n 40 --checkpoint runs/tcn/model.pt     # + NN measurement
+```
+
+| Variant | Load pitch MAE | P95 | within 0.2° | within 2σ | Closed-loop MAE | Closed-loop P95 | Convergence median / P90 |
+|---|---|---|---|---|---|---|---|
+| EKF: IMU + wheel speed | 0.067° | 0.209° | 95.0 % | 93.6 % | 0.070° | 0.220° | 7 / 74 s |
+| EKF: IMU + wheel + camera | **0.052°** | **0.155°** | **96.0 %** | **94.8 %** | **0.055°** | **0.173°** | 7 / **25 s** |
+
+These are interim results on 16 test trips. Convergence is measured on the 11 trips whose true
+load differs from the initial value by at least 0.3°.
+
+## 8. Results (simulated test split)
 
 These are results on the simulated test split: 80 unseen trips (13.3 h), each 10 min long, with
 7,760 windows. The models were trained for 25 epochs on 400 trips with `configs/default.yaml`.
@@ -214,7 +261,7 @@ What these numbers show:
 
 The full per-category tables are in `runs/<arch>/eval_test/report.md`.
 
-## 8. Using real vehicle data
+## 9. Using real vehicle data
 
 The simulator only provides the starting point. Close the sim-to-real gap with logs from an
 instrumented reference vehicle.
@@ -237,7 +284,7 @@ instrumented reference vehicle.
 5. Re-fit the simulator ranges in `configs/*.yaml` (axle rates, pitch gradient, IMU noise) to the
    measured vehicle so the synthetic data stays useful for rare cases.
 
-## 9. Deployment notes
+## 10. Deployment notes
 
 - **MCU budget.** The GRU (~32 k parameters) is the cheapest model to deploy. Its streaming
   form needs no 120 s window buffer. The TCN and hybrid models fit in int8 within ~150 kB of flash.
@@ -250,10 +297,12 @@ instrumented reference vehicle.
   latched fail-safe position.
 - **End-of-line.** Calibrate the IMU mounting pitch together with the headlamp aim. Residual
   misalignment adds directly to the error (simulated at 0.05° 1σ).
+- **EKF on target.** See [`docs/ekf_design.md`](docs/ekf_design.md) §11: about 0.35 MMAC/s at
+  50 Hz, about 1 kB of RAM, and notes on single precision.
 - **NVM.** Store the last fused estimate at ignition-off and restore it at start, so the lamps are
   correct before the first excitation.
 
-## 10. Limitations / next steps
+## 11. Limitations / next steps
 
 - The vehicle model is planar (pitch, heave, simplified roll). There is no tyre or suspension
   kinematic coupling, and no anti-squat or anti-dive geometry beyond the pitch gradient.

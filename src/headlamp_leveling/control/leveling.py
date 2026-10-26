@@ -59,13 +59,23 @@ class LevelingController:
         self.estimate += min(alpha, 1.0) * (est - self.estimate)
 
     def update(self, dt: float, estimate_deg: float = float("nan"), excitation: float = 0.0,
-               standstill: bool = False, tilt_deg: float = float("nan"), fault: bool = False) -> ControllerOutput:
+               standstill: bool = False, tilt_deg: float = float("nan"), fault: bool = False,
+               estimate_std_deg: float = float("nan")) -> ControllerOutput:
+        """One controller cycle.
+
+        Window estimators pass ``excitation``; the EKF passes ``estimate_std_deg``
+        instead, in which case its (already filtered) estimate is used directly
+        whenever its 1-sigma is below ``max_estimate_std_deg``.
+        """
         c = self.cfg
         self.fault = self.fault or fault
         if self.fault:
             self.target = c.failsafe_deg
         else:
-            if standstill and np.isfinite(tilt_deg):
+            if np.isfinite(estimate_std_deg):
+                if np.isfinite(estimate_deg) and estimate_std_deg <= c.max_estimate_std_deg:
+                    self.estimate = float(estimate_deg)
+            elif standstill and np.isfinite(tilt_deg):
                 if self._stop_ref_tilt is None:
                     self._stop_ref_tilt = tilt_deg
                     self._stop_ref_estimate = self.estimate

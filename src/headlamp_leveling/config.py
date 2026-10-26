@@ -117,6 +117,74 @@ class ControlConfig:
     range_deg: Tuple[float, float] = (-1.0, 3.0)   # correction range (nose-up pitch the lamp can compensate)
     failsafe_deg: float = 0.0              # safe correction used on sensor fault
     steps_per_deg: float = 40.0            # stepper actuator resolution
+    max_estimate_std_deg: float = 0.3      # accept an estimate with a reported 1-sigma (EKF) below this
+
+
+@dataclass
+class CameraConfig:
+    """Front camera used as an auxiliary pitch sensor (lane vanishing point / road plane)."""
+    enabled: bool = True
+    rate_hz: float = 10.0
+    noise_deg: float = 0.15                # per-frame pitch noise (1 sigma)
+    bias_deg: float = 0.10                 # residual extrinsic pitch error after calibration (1 sigma)
+    outlier_prob: float = 0.02             # wrong lane association, shadows, ...
+    outlier_deg: float = 1.5
+    lookahead_m: float = 30.0              # distance of the detected road plane
+    mean_on_s: float = 25.0                # lane markings detected
+    mean_off_s: float = 10.0               # no detection (unmarked road, night, rain, ...)
+    min_speed_ms: float = 8.0
+
+
+@dataclass
+class FusionConfig:
+    """Extended Kalman filter fusing IMU, wheel speed and camera (see docs/ekf_design.md)."""
+    fs_hz: float = 50.0                    # filter rate; raw 100 Hz data is block-averaged to it
+    use_camera: bool = True
+    # Nominal vehicle model (known per vehicle programme; true values differ per car).
+    pitch_freq_hz: float = 1.4
+    pitch_damping: float = 0.4
+    pitch_gradient_deg_per_g: float = 2.5
+    pitch_gradient_rel_std: float = 0.4    # prior uncertainty of the pitch gradient
+    camera_lookahead_m: float = 30.0
+    # Initial uncertainty (1 sigma).
+    init_load_pitch_deg: float = 0.0
+    init_load_pitch_std_deg: float = 1.0
+    init_accel_bias_mg: float = 20.0
+    init_gyro_bias_dps: float = 0.5
+    init_wheel_scale_std: float = 0.02
+    init_camera_bias_deg: float = 0.2
+    # Process noise (continuous-time spectral densities, 1 sigma per sqrt(s)).
+    q_jerk: float = 2.0                    # m/s^2 / sqrt(s)
+    q_grade_curv: float = 2e-4             # grade-rate change per metre travelled, rad/s / sqrt(m)
+    grade_rate_tau_s: float = 5.0
+    q_load_pitch_drive_deg: float = 0.002  # static pitch drift while driving (fuel, settling)
+    q_load_pitch_stop_deg: float = 2.0     # on a detected load change at standstill (per sqrt(s))
+    q_pitch_dyn_rate: float = 0.002        # unmodelled pitch acceleration per m/s of speed, rad/s^2 / sqrt(s)
+    q_accel_bias_mg: float = 0.02
+    q_gyro_bias_dps: float = 0.002
+    # Measurement noise (1 sigma). IMU noise is adaptive (first-difference variance,
+    # time constant r_adapt_tau_s); these values are its floors.
+    r_accel_x: float = 0.03
+    r_accel_z: float = 0.03
+    r_gyro_dps: float = 0.05
+    r_adapt_tau_s: float = 2.0
+    r_colored_inflation: float = 2.0       # residual correlation of road vibration at the filter rate
+    r_wheel_ms: float = 0.03
+    r_wheel_slip: float = 0.003            # extra sigma per m/s^2 of |a| (tyre slip)
+    r_camera_deg: float = 0.25
+    # Robustness.
+    standstill_speed_ms: float = 0.05
+    standstill_min_s: float = 0.5
+    drive_away_accel_std: float = 2.0      # acceleration uncertainty re-opened when leaving standstill
+    standstill_settle_s: float = 2.0       # wait for the brake-dive rebound before taking a tilt reference
+    tilt_lp_tau_s: float = 0.3
+    load_change_tilt_deg: float = 0.04     # tilt change at standstill treated as a load change
+    load_change_max_deg: float = 3.0       # larger steps are vehicle motion, not load
+    load_change_delay_s: float = 1.0       # decide on the tilt this long ago, if still standing now
+    gate_camera: float = 10.83             # chi^2(1) 99.9 %
+    gate_imu: float = 30.0
+    fault_nis: float = 9.0                 # mean NIS over the window that flags a sensor fault
+    fault_window_s: float = 5.0
 
 
 @dataclass
@@ -128,6 +196,8 @@ class Config:
     model: ModelConfig = field(default_factory=ModelConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
     control: ControlConfig = field(default_factory=ControlConfig)
+    camera: CameraConfig = field(default_factory=CameraConfig)
+    fusion: FusionConfig = field(default_factory=FusionConfig)
 
     @property
     def model_fs_hz(self) -> float:

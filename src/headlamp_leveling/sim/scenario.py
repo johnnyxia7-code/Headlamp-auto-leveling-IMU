@@ -26,6 +26,7 @@ import numpy as np
 
 from .. import G
 from ..config import Config
+from .camera import camera_pitch_measurements
 from .driving import drive_cycle
 from .imu import imu_measurements, wheel_speed_measurement
 from .road import curvature_profile, grade_profile, iso8608_profile
@@ -64,7 +65,13 @@ def _decimate(x: np.ndarray, q: int) -> np.ndarray:
     return x[:n].reshape(n // q, q, *x.shape[1:]).mean(axis=1)
 
 
-def simulate_trip(cfg: Config, seed: int | np.random.SeedSequence) -> Dict[str, Any]:
+def simulate_trip(cfg: Config, seed: int | np.random.SeedSequence, raw: bool = False) -> Dict[str, Any]:
+    """Simulate one trip.
+
+    Returns the decimated model inputs and labels. With ``raw=True`` the
+    result also holds ``"raw"``: full-rate sensor signals, the camera pitch
+    frames and the ground truth, as used by the sensor-fusion EKF.
+    """
     rng = np.random.default_rng(seed)
     sc = cfg.sim
     fs, dt = sc.fs_hz, 1.0 / sc.fs_hz
@@ -136,10 +143,10 @@ def simulate_trip(cfg: Config, seed: int | np.random.SeedSequence) -> Dict[str, 
 
     imu = imu_measurements(rng, cfg.imu, fs, f_body, w_body, v)
     v_wheel = wheel_speed_measurement(rng, cfg.imu, v, a)
-    raw = np.concatenate([imu, v_wheel[:, None]], axis=1)
+    sensors = np.concatenate([imu, v_wheel[:, None]], axis=1)
 
     q = sc.decimation
-    x = _decimate(raw, q).astype(np.float32)
+    x = _decimate(sensors, q).astype(np.float32)
     # Labels are sampled (not averaged) at the end of each decimation block so a
     # load step is not smeared across the block.
     idx = np.arange(q - 1, (n // q) * q, q)
@@ -151,7 +158,7 @@ def simulate_trip(cfg: Config, seed: int | np.random.SeedSequence) -> Dict[str, 
         "roughness_class": rough_cls,
         "load_pitch_deg_initial": float(np.rad2deg(theta_static[0])),
     }
-    return {
+    out = {
         "inputs": x,
         "load_pitch_deg": np.rad2deg(theta_static[idx]).astype(np.float32),
         "road_grade_deg": np.rad2deg(gamma[idx]).astype(np.float32),
@@ -160,3 +167,20 @@ def simulate_trip(cfg: Config, seed: int | np.random.SeedSequence) -> Dict[str, 
         "accel_ms2": a[idx].astype(np.float32),
         "meta": meta,
     }
+    if raw:
+        # Drawn after all other random numbers so the decimated data do not depend on `raw`.
+        gamma_ahead = np.interp(pos - L / 2.0 + cfg.camera.lookahead_m, s_macro, grade_s)
+        cam, cam_bias = camera_pitch_measurements(rng, cfg.camera, fs, theta, gamma, gamma_ahead, v)
+        meta["camera_bias_deg"] = cam_bias
+        meta["imu_fs_hz"] = fs
+        out["raw"] = {
+            "inputs": sensors.astype(np.float32),
+            "camera_pitch_deg": cam.astype(np.float32),
+            "load_pitch_deg": np.rad2deg(theta_static).astype(np.float32),
+            "road_grade_deg": np.rad2deg(gamma).astype(np.float32),
+            "body_pitch_deg": np.rad2deg(theta).astype(np.float32),
+            "speed_ms": v.astype(np.float32),
+            "accel_ms2": a.astype(np.float32),
+            "fs_hz": fs,
+        }
+    return out

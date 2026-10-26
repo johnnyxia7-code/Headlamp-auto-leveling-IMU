@@ -24,3 +24,4 @@ jobs:
           hal train -c configs/quick.yaml --epochs 1
           hal evaluate runs/quick/model.pt
           hal export runs/quick/model.pt --no-onnx
+          hal fuse-eval -c configs/quick.yaml -n 2 -o runs/quick_fusion

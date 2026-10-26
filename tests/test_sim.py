@@ -84,6 +84,9 @@ def test_standstill_accelerometer_sees_grade_plus_load_pitch():
 @pytest.mark.parametrize("seed", [1, 2])
 def test_physics_estimator_recovers_pitch_with_ideal_sensors(seed):
     cfg = _ideal_cfg(trip_duration_s=400.0)
+    # Rolling roads: on hilly roads grade changes inside the window limit the
+    # window baseline to ~0.2 deg even with ideal sensors (the EKF handles them).
+    cfg.sim.grade_classes = [("rolling", 5.0, 1.0)]
     trip = simulate_trip(cfg, seed)
     feats = build_features(trip["inputs"], cfg.model_fs_hz)
     est = PhysicsEstimator(cfg.model_fs_hz, min_excitation_ms2=0.3)

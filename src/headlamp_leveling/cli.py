@@ -47,6 +47,12 @@ def _cmd_import_logs(a) -> None:
     print(f"[import] {len(ts)} logs, {ts.inputs.shape[0] / ts.fs_hz / 3600:.2f} h -> {a.out}")
 
 
+def _cmd_fuse_eval(a) -> None:
+    from .fusion.run import evaluate_fusion
+    cfg = load_config(a.config)
+    evaluate_fusion(cfg, a.trips, a.out, a.checkpoint, a.nn_std)
+
+
 def _cmd_simulate(a) -> None:
     import numpy as np
     from .sim.scenario import simulate_trip
@@ -96,6 +102,14 @@ def main(argv: Optional[List[str]] = None) -> None:
     i.add_argument("--h-ref-front", type=float, default=None, help="reference front ride height, mm")
     i.add_argument("--h-ref-rear", type=float, default=None, help="reference rear ride height, mm")
     i.set_defaults(func=_cmd_import_logs)
+
+    f = sub.add_parser("fuse-eval", help="evaluate the IMU + wheel + camera EKF on simulated test trips")
+    f.add_argument("-c", "--config", default=None)
+    f.add_argument("-n", "--trips", type=int, default=20)
+    f.add_argument("-o", "--out", default="runs/fusion")
+    f.add_argument("--checkpoint", default=None, help="also fuse this window model as a load-pitch measurement")
+    f.add_argument("--nn-std", type=float, default=0.35, help="1-sigma assigned to the model output, deg")
+    f.set_defaults(func=_cmd_fuse_eval)
 
     s = sub.add_parser("simulate", help="simulate one trip and print its scenario")
     s.add_argument("-c", "--config", default=None)
