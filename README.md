@@ -210,35 +210,52 @@ hal fuse-eval -c configs/default.yaml -n 40 -o runs/fusion                     #
 hal fuse-eval -c configs/default.yaml -n 40 --checkpoint runs/tcn/model.pt     # + NN measurement
 ```
 
-| Variant | Load pitch MAE | P95 | within 0.2° | within 2σ | Closed-loop MAE | Closed-loop P95 | Convergence median / P90 |
-|---|---|---|---|---|---|---|---|
-| EKF: IMU + wheel speed | 0.067° | 0.209° | 95.0 % | 93.6 % | 0.070° | 0.220° | 7 / 74 s |
-| EKF: IMU + wheel + camera | **0.052°** | **0.155°** | **96.0 %** | **94.8 %** | **0.055°** | **0.173°** | 7 / **25 s** |
+Results on 40 simulated test trips, measured after the first 120 s. These are the same trips as
+the window models' test split.
 
-These are interim results on 16 test trips. Convergence is measured on the 11 trips whose true
-load differs from the initial value by at least 0.3°.
+| Variant | Load pitch MAE | P95 | within 0.2° | within 2σ | Closed-loop MAE | Closed-loop P95 | Convergence P90 |
+|---|---|---|---|---|---|---|---|
+| EKF: IMU + wheel speed | 0.106° | 0.449° | 87.0 % | 86.7 % | 0.113° | 0.467° | 409 s |
+| EKF: + camera | 0.071° | 0.236° | 91.8 % | 90.2 % | 0.074° | 0.228° | 83 s |
+| EKF: + NN measurement (TCN) | 0.089° | 0.287° | 91.2 % | 86.7 % | 0.095° | 0.309° | 179 s |
+| EKF: + camera + NN | **0.064°** | **0.192°** | **95.5 %** | **91.5 %** | **0.068°** | **0.204°** | **83 s** |
+| *for comparison: TCN window model (§8)* | 0.143° | 0.435° | 77.8 % | – | 0.159° | 0.569° | – |
+
+- **The EKF beats the window models.** Even without the camera, its closed-loop error is about 30 %
+  lower than the TCN's (0.113° vs. 0.159°). The camera roughly halves the TCN's error (0.074°).
+  Fusing all three gives the best result, with 98 % of the time within 0.5 % aim error.
+- **The camera mainly speeds up convergence from a wrong initial value.** Convergence is measured
+  on the 22 trips that start at least 0.3° away from the filter's initial value. The 90th-percentile
+  time is 83 s with the camera and 409 s without it. Camera frames are available on only 11 % of
+  filter steps.
+- **The remaining errors come mostly from ISO 8608 class C (rough) roads** (up to about 0.5° on
+  single trips without the camera) and from load changes in the first 2 s of a stop. See
+  [`docs/ekf_design.md`](docs/ekf_design.md) §13.
+- **The filter is mildly overconfident.** 87–92 % of errors fall within 2σ, against an ideal of
+  95 %. The controller's `max_estimate_std_deg` gate leaves margin for this.
 
 ## 8. Results (simulated test split)
 
-These are results on the simulated test split: 80 unseen trips (13.3 h), each 10 min long, with
-7,760 windows. The models were trained for 25 epochs on 400 trips with `configs/default.yaml`.
+These are results for the window models (TCN, hybrid) and the physics baseline on the simulated
+test split: 80 unseen trips (13.3 h), each 10 min long, with 7,760 windows. The models were trained
+for up to 25 epochs on 400 trips with `configs/default.yaml`. For the sensor-fusion EKF, see §7.
 
 **Window-level load-pitch error**
 
 | Estimator | MAE (deg) | RMSE | P95 | within 0.1° | within 0.2° |
 |---|---|---|---|---|---|
-| physics baseline | 0.181 | 0.296 | 0.554 | 42.9 % | 71.1 % |
-| `tcn` | **0.147** | **0.219** | **0.421** | **48.9 %** | **77.3 %** |
-| `hybrid` | 0.155 | 0.234 | 0.434 | 48.3 % | 73.7 % |
-| `gru` | not yet benchmarked at full scale (the run was interrupted) | | | | |
+| physics baseline | 0.196 | 0.313 | 0.601 | 41.0 % | 67.9 % |
+| `tcn` | **0.143** | **0.221** | **0.435** | **52.2 %** | **77.8 %** |
+| `hybrid` | 0.158 | 0.241 | 0.447 | 47.3 % | 72.8 % |
+| `gru` | not benchmarked at full scale | | | | |
 
 **Closed loop: estimator + leveling controller, aim error after the first window**
 
 | Estimator | MAE (deg) | P95 (deg) | within 0.25 % | within 0.5 % |
 |---|---|---|---|---|
-| physics baseline | 0.160 | 0.568 | 63.8 % | 85.8 % |
-| `tcn` | 0.151 | **0.470** | 63.8 % | **87.4 %** |
-| `hybrid` | 0.161 | 0.483 | 61.5 % | 84.7 % |
+| physics baseline | 0.186 | 0.624 | 55.3 % | 83.0 % |
+| `tcn` | **0.159** | **0.569** | **62.8 %** | **86.2 %** |
+| `hybrid` | 0.172 | 0.577 | 58.0 % | 83.4 % |
 
 What these numbers show:
 
@@ -247,14 +264,14 @@ What these numbers show:
   acceleration and braking events to rise above ride vibration. Moving to 120 s windows at 5 Hz
   keeps the same 600-sample input and cut the error to the values above.
 - **The learned models help most where the physics baseline is weak.** On mountain roads the TCN
-  error is 0.175° against 0.39° for the baseline. With a trailer it is 0.146° against 0.227°.
-- **Heavy loads are underestimated.** For load pitch above 1.25°, the TCN MAE is 0.26° with a bias
-  of −0.20°, and in the `max_rear` case the baseline is better. These loads are rare in the
-  training mix, and the Huber loss shrinks predictions toward the mean.
+  error is 0.191° against 0.292° for the baseline. With a trailer it is 0.113° against 0.187°.
+- **Heavy loads are still hardest.** For load pitch above 1.25°, the TCN MAE is 0.26° with a bias of
+  −0.16°. These loads are rare in the training mix, and the Huber loss shrinks predictions toward
+  the mean.
 - **The controller narrows the gap.** Its filtering averages the window estimates, so the
-  closed-loop MAE of the model and the baseline end up close. The model's advantage shows mainly in
-  the tail (P95). Next steps: train longer (validation MAE was still falling at epoch 25), weight
-  the heavy-load cases, and feed the physics estimate to the network as an input.
+  closed-loop MAE of the model and the baseline end up close.
+- **Next steps for the window models:** weight the heavy-load cases, and use the models as an extra
+  measurement in the EKF rather than on their own. That fused variant is the best one in §7.
 - **Before the first full window,** the controller holds its initial value (the reference state).
   This is why the whole-trip MAE is about 0.25°. In a vehicle, the value stored in NVM at the last
   ignition-off covers this period.

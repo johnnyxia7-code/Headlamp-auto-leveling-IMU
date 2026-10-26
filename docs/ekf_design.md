@@ -188,7 +188,7 @@ R = max(R_floor, σ̂²) · 2.0          (factor 2: residual correlation of road
 
 This adaptation needs no vehicle model, so filter errors cannot feed back into it
 (an innovation-based R estimate can lock onto those errors). Section 10 shows the
-resulting consistency: about 94 % of errors fall within 2σ.
+resulting consistency: 87–92 % of errors fall within 2σ, against an ideal of 95 %.
 
 A shaping-filter model (heave states driven by road-velocity noise) was also tried.
 It made consistency worse, because the disturbance is not concentrated at the
@@ -278,13 +278,20 @@ The evaluation uses the same trips as the test split of the neural models. Metri
 are taken after the first 120 s (the window length of the neural models), so the
 two can be compared.
 
-| Variant | Load pitch MAE | P95 | within 0.2° | within 2σ | Closed-loop MAE | Closed-loop P95 | Convergence median / P90 |
+| Variant | Load pitch MAE | P95 | within 0.2° | within 2σ | Closed-loop MAE | Closed-loop P95 | Convergence P90 |
 |---|---|---|---|---|---|---|---|
-| EKF: IMU + wheel speed | 0.067° | 0.209° | 95.0 % | 93.6 % | 0.070° | 0.220° | 7 / 74 s |
-| EKF: IMU + wheel + camera | **0.052°** | **0.155°** | **96.0 %** | **94.8 %** | **0.055°** | **0.173°** | 7 / **25 s** |
+| EKF: IMU + wheel speed | 0.106° | 0.449° | 87.0 % | 86.7 % | 0.113° | 0.467° | 409 s |
+| EKF: + camera | 0.071° | 0.236° | 91.8 % | 90.2 % | 0.074° | 0.228° | 83 s |
+| EKF: + NN measurement (TCN) | 0.089° | 0.287° | 91.2 % | 86.7 % | 0.095° | 0.309° | 179 s |
+| EKF: + camera + NN | **0.064°** | **0.192°** | **95.5 %** | **91.5 %** | **0.068°** | **0.204°** | **83 s** |
+| *for comparison: TCN window model (README §8)* | 0.143° | 0.435° | 77.8 % | – | 0.159° | 0.569° | – |
 
-These are interim results on 16 test trips. Convergence is measured on the 11 trips whose true
-load differs from the initial value by at least 0.3°.
+- **Convergence** is measured on the 22 trips whose true load differs from the initial value by at
+  least 0.3°.
+- **Consistency:** 87–92 % of errors fall within 2σ, slightly below the ideal 95 %. The worst trips
+  are on ISO 8608 class C roads, where the residual correlation of the vibration exceeds the
+  inflation factor of 2.
+- **Fault handling:** no false faults on any of the 40 trips.
 
 ## 11. Embedded implementation notes
 
