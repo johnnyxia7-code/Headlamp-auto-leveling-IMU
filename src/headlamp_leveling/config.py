@@ -116,7 +116,8 @@ class ControlConfig:
     deadband_deg: float = 0.05
     max_rate_deg_s: float = 0.5            # actuator slew limit
     range_deg: Tuple[float, float] = (-1.0, 3.0)   # correction range (nose-up pitch the lamp can compensate)
-    failsafe_deg: float = 0.0              # safe correction used on sensor fault
+    failsafe_deg: float = 0.0              # minimum correction on a fault; the beam is never raised
+                                           # above the position it had when the fault occurred
     steps_per_deg: float = 40.0            # stepper actuator resolution
     max_estimate_std_deg: float = 0.3      # accept an estimate with a reported 1-sigma (EKF) below this
 
@@ -147,6 +148,7 @@ class FusionConfig:
     pitch_gradient_deg_per_g: float = 2.5
     pitch_gradient_rel_std: float = 0.4    # prior uncertainty of the pitch gradient
     camera_lookahead_m: float = 30.0
+    camera_min_speed_ms: float = 8.0       # below this the look-ahead term dominates: frames not used
     # Initial uncertainty (1 sigma).
     init_load_pitch_deg: float = 0.0
     init_load_pitch_std_deg: float = 1.0
@@ -187,7 +189,54 @@ class FusionConfig:
     fault_nis: float = 9.0                 # mean NIS over the window that flags a sensor fault
     fault_nis_cap: float = 25.0            # per-sample cap so single transients cannot trip it
     fault_window_s: float = 5.0
+    fault_window_aux_updates: int = 20     # camera / NN monitor window, in number of their own updates
+    fault_clear_ratio: float = 0.33        # hysteresis: a fault clears below fault_nis * ratio
     fault_warmup_s: float = 30.0           # no fault evaluation while the filter converges
+    gate_lockout_s: float = 1.0            # a sensor gated out this long re-opens the states it observes
+    max_step_s: float = 0.05               # a longer gap between samples is predicted in sub-steps
+    huber_k: float = 3.0                   # Huber weighting of IMU / wheel innovations; 0 = off
+    recover_load_pitch_std_deg: float = 0.5   # sigma used after a numerical reset
+
+
+@dataclass
+class InputGuardConfig:
+    """Resilient sensor-input layer in front of the EKF (see docs/input_guard.md)."""
+    enabled: bool = True
+    # 1. Sample validity: physical range (sensor full scale minus margin = saturation).
+    accel_range_ms2: float = 19.0          # +-2 g sensor
+    gyro_range_dps: float = 245.0          # +-250 dps sensor
+    speed_range_ms: Tuple[float, float] = (0.0, 90.0)
+    camera_range_deg: float = 10.0
+    # 2. Spikes: causal Hampel test on the last `hampel_window` valid samples.
+    hampel_window: int = 11
+    hampel_k: float = 6.0                  # threshold in robust sigmas (1.4826 MAD)
+    spike_min_accel_ms2: float = 2.5       # never call a smaller deviation a spike
+    spike_min_gyro_dps: float = 25.0
+    wheel_max_accel_ms2: float = 15.0      # speed cannot change faster than this
+    # 3. Stuck (frozen) signal: no change at all although sensor noise must be present.
+    stuck_s: float = 0.3
+    stuck_eps_accel_ms2: float = 1e-5
+    stuck_eps_gyro_dps: float = 1e-5
+    stuck_eps_speed_ms: float = 1e-6
+    camera_stuck_frames: int = 5
+    # 4. Cross-sensor plausibility (physics that must hold whatever the load and road).
+    still_norm_tol_ms2: float = 0.8        # | |f| - g | at standstill
+    still_gyro_max_dps: float = 3.0        # any rate axis at standstill (bias only)
+    still_ax_change_ms2: float = 1.0       # ax change while wheel speed reads 0: the car is moving
+    still_vibration_max_ms2: float = 0.08  # az sample-to-sample noise at a real standstill (incl. idle)
+    az_dev_max_ms2: float = 1.2            # | lowpass(az) - g | while driving (grade + bias)
+    gyro_mean_max_dps: float = 5.0         # | lowpass(gy) | while driving: pitch cannot keep rotating
+    accel_wheel_mismatch_ms2: float = 3.5  # | ax - d(v_wheel)/dt | beyond g sin(max slope) + margin
+    plaus_lp_tau_s: float = 2.0
+    plaus_qualify_s: float = 2.0
+    # 5. Debounce: a channel is FAILED after `qualify_s` of bad samples and heals after
+    #    `heal_s` of continuous good ones.
+    qualify_s: float = 0.5
+    heal_s: float = 2.0
+    wheel_heal_s: float = 4.0              # longer: the "moving at zero speed" rule needs ~3.5 s to object
+    camera_timeout_s: float = 0.0          # 0 = camera absence is normal (no lane markings)
+    # 6. System reaction.
+    failsafe_after_s: float = 3.0          # a critical channel FAILED this long -> lamp fail-safe
 
 
 @dataclass
@@ -201,6 +250,7 @@ class Config:
     control: ControlConfig = field(default_factory=ControlConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
     fusion: FusionConfig = field(default_factory=FusionConfig)
+    guard: InputGuardConfig = field(default_factory=InputGuardConfig)
 
     @property
     def model_fs_hz(self) -> float:

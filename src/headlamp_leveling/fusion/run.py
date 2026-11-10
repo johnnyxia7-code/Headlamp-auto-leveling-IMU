@@ -38,30 +38,127 @@ def _block_last_finite(x: np.ndarray, q: int) -> np.ndarray:
     return out
 
 
+def _block_nanmean(x: np.ndarray, q: int) -> np.ndarray:
+    """Block mean ignoring NaN; a block without any valid sample stays NaN."""
+    n = (x.shape[0] // q) * q
+    b = x[:n].reshape(n // q, q, *x.shape[1:])
+    ok = np.isfinite(b)
+    cnt = ok.sum(axis=1)
+    return np.where(cnt > 0, np.where(ok, b, 0.0).sum(axis=1) / np.maximum(cnt, 1), np.nan)
+
+
+def _hold_missing(x: np.ndarray) -> np.ndarray:
+    """Naive handling of missing samples (no guard): repeat the last received value."""
+    x = x.copy()
+    for j in range(x.shape[1]):
+        col = x[:, j]
+        ok = np.isfinite(col)
+        if ok.all():
+            continue
+        idx = np.where(ok, np.arange(col.size), 0)
+        np.maximum.accumulate(idx, out=idx)
+        x[:, j] = np.where(ok.any(), col[idx], 0.0)
+        x[~np.isfinite(x[:, j]), j] = 0.0
+    return x
+
+
+def guard_signals(raw: Dict[str, np.ndarray], cfg: Config) -> Dict[str, np.ndarray]:
+    """Run the input guard over a trip at the raw sample rate.
+
+    Returns the cleaned signals (NaN = rejected) plus per-sample flags.
+    """
+    from .input_guard import CHANNELS as GCH, CRITICAL, Health, SensorInputGuard
+    inp = raw["inputs"].astype(np.float64)
+    cam = raw["camera_pitch_deg"].astype(np.float64)
+    n = inp.shape[0]
+    dt = 1.0 / raw["fs_hz"]
+    src = [CHANNELS.index(c) for c in GCH[:-1]]
+    samples = np.concatenate([inp[:, src], cam[:, None]], axis=1).tolist()
+    guard = SensorInputGuard(cfg.guard)
+    clean = np.empty((n, len(GCH)))
+    failsafe = np.zeros(n, bool)
+    degraded = np.zeros(n, bool)
+    critical_failed = np.zeros(n, bool)
+    recovered: List[tuple] = []
+    isolated: List[tuple] = []
+    any_failed = np.zeros(n, bool)
+    for k in range(n):
+        o = guard.process(samples[k], dt)
+        clean[k] = o.values
+        failsafe[k], degraded[k], critical_failed[k] = o.failsafe, o.degraded, o.critical_failed
+        any_failed[k] = any(h == Health.FAILED for h in o.health.values())
+        if o.recovered:
+            recovered.append((k, o.recovered, o.outage_s))
+        if o.newly_failed:
+            isolated.append((k, o.newly_failed))
+    back = np.full_like(inp, np.nan)
+    back[:, src] = clean[:, :-1]
+    if "gx" not in GCH:                       # pragma: no cover - defensive
+        back[:, CHANNELS.index("gx")] = inp[:, CHANNELS.index("gx")]
+    return {"inputs": back, "camera_pitch_deg": clean[:, -1], "failsafe": failsafe, "degraded": degraded,
+            "critical_failed": critical_failed, "any_failed": any_failed, "recovered": recovered,
+            "isolated": isolated, "summary": guard.summary(),
+            "final_health": {c: int(guard.ch[c].health) for c in GCH}}
+
+
 def run_ekf(raw: Dict[str, np.ndarray], cfg: Config, use_camera: Optional[bool] = None,
-            load_pitch_meas: Optional[LoadPitchMeasurements] = None) -> Dict[str, np.ndarray]:
+            load_pitch_meas: Optional[LoadPitchMeasurements] = None,
+            guard: Optional[bool] = None) -> Dict[str, np.ndarray]:
     """Filter one trip given its full-rate signals (``simulate_trip(..., raw=True)["raw"]``).
+
+    With ``guard`` (default: ``cfg.guard.enabled``) the raw samples first pass the
+    resilient input layer; rejected samples reach the EKF as NaN and are skipped.
+    Without it, missing samples are replaced by the last received value.
 
     Returns time series at the fusion rate: estimates, 1-sigma, truth and flags.
     """
     fcfg = copy.deepcopy(cfg.fusion)
     if use_camera is not None:
         fcfg.use_camera = use_camera
+    use_guard = cfg.guard.enabled if guard is None else guard
     q = max(1, int(round(raw["fs_hz"] / fcfg.fs_hz)))
     fs = raw["fs_hz"] / q
     fcfg.fs_hz = fs
     dt = 1.0 / fs
-    x = _block_mean(raw["inputs"].astype(np.float64), q)
-    cam = _block_last_finite(raw["camera_pitch_deg"].astype(np.float64), q)
-    idx = np.arange(q - 1, x.shape[0] * q, q)            # truth sampled at block ends
+    n = raw["inputs"].shape[0] // q
+    if use_guard:
+        g = guard_signals(raw, cfg)
+        x = _block_nanmean(g["inputs"], q)
+        cam = _block_last_finite(g["camera_pitch_deg"], q)
+        failsafe_req = g["failsafe"][:n * q].reshape(n, q).any(axis=1)
+        degraded = g["degraded"][:n * q].reshape(n, q).any(axis=1)
+        recover_at: Dict[int, tuple] = {}
+        for k_raw, channels, outage in g["recovered"]:
+            kb = min(n - 1, k_raw // q)
+            prev = recover_at.get(kb, ((), 0.0))
+            recover_at[kb] = (tuple(set(prev[0]) | set(channels)), max(prev[1], outage))
+        isolate_at: Dict[int, set] = {}
+        for k_raw, channels in g["isolated"]:
+            isolate_at.setdefault(min(n - 1, k_raw // q), set()).update(channels)
+    else:
+        g = None
+        x = _block_mean(_hold_missing(raw["inputs"].astype(np.float64)), q)
+        cam = _block_last_finite(raw["camera_pitch_deg"].astype(np.float64), q)
+        failsafe_req = np.zeros(n, bool)
+        degraded = np.zeros(n, bool)
+        recover_at = {}
+        isolate_at = {}
+    idx = np.arange(q - 1, n * q, q)                     # truth sampled at block ends
 
     ekf = PitchEKF(fcfg)
-    n = x.shape[0]
     keys = ("load_pitch_deg", "load_pitch_std_deg", "road_grade_deg", "road_grade_std_deg", "body_pitch_deg")
     out = {k: np.empty(n) for k in keys}
     out["standstill"] = np.zeros(n, bool)
     out["fault"] = np.zeros(n, bool)
+    # With the guard, a model-inconsistency (NIS) fault must persist before it latches the
+    # fail-safe: the guard needs up to plaus_qualify_s to isolate a bad channel first.
+    persist = int(round(cfg.guard.failsafe_after_s * fs)) if use_guard else 1
+    fault_run = 0
     for k in range(n):
+        if k in isolate_at:
+            ekf.notify_isolated(isolate_at[k])
+        if k in recover_at:
+            ekf.notify_recovered(*recover_at[k])
         o = ekf.step(dt, x[k, AX], x[k, AZ], x[k, GY], x[k, VW], cam[k], x[k, AY], x[k, GZ])
         if load_pitch_meas and k in load_pitch_meas:
             z, sd = load_pitch_meas[k]
@@ -70,8 +167,13 @@ def run_ekf(raw: Dict[str, np.ndarray], cfg: Config, use_camera: Optional[bool] 
         for key in keys:
             out[key][k] = getattr(o, key)
         out["standstill"][k] = o.standstill
-        out["fault"][k] = o.critical_fault
+        fault_run = fault_run + 1 if o.critical_fault else 0
+        out["fault"][k] = fault_run >= persist
     out["fs_hz"] = fs
+    out["failsafe_request"] = failsafe_req
+    out["degraded"] = degraded
+    out["guard"] = g
+    out["numeric_resets"] = ekf.numeric_resets
     out["true_load_pitch_deg"] = raw["load_pitch_deg"][idx].astype(np.float64)
     out["true_road_grade_deg"] = raw["road_grade_deg"][idx].astype(np.float64)
     out["camera_frames"] = np.isfinite(cam)
@@ -79,18 +181,30 @@ def run_ekf(raw: Dict[str, np.ndarray], cfg: Config, use_camera: Optional[bool] 
     return out
 
 
-def closed_loop_from_series(res: Dict[str, np.ndarray], cfg: Config, warmup_s: float) -> np.ndarray:
-    """Feed the EKF output to the leveling controller; return |aim error| after warm-up (deg)."""
+def closed_loop_series(res: Dict[str, np.ndarray], cfg: Config) -> Dict[str, np.ndarray]:
+    """Feed the EKF output to the leveling controller.
+
+    Returns, at the controller rate: time (s), signed aim error (deg) and the fail-safe flag.
+    """
     fs = res["fs_hz"]
     period = max(1, int(round(cfg.control.update_period_s * fs)))
     ctrl = LevelingController(cfg.control)
-    errs = []
+    t, err, fs_flag = [], [], []
+    req = res.get("failsafe_request")
     for k in range(period - 1, len(res["load_pitch_deg"]), period):
         out = ctrl.update(period / fs, res["load_pitch_deg"][k], estimate_std_deg=res["load_pitch_std_deg"][k],
-                          fault=bool(res["fault"][k]))
-        if k / fs >= warmup_s:
-            errs.append(abs(res["true_load_pitch_deg"][k] - out.correction_deg))
-    return np.asarray(errs)
+                          fault=bool(res["fault"][k - period + 1:k + 1].any()),
+                          failsafe_request=bool(req[k - period + 1:k + 1].any()) if req is not None else False)
+        t.append(k / fs)
+        err.append(res["true_load_pitch_deg"][k] - out.correction_deg)
+        fs_flag.append(out.fault)
+    return {"t": np.asarray(t), "err": np.asarray(err), "failsafe": np.asarray(fs_flag, bool)}
+
+
+def closed_loop_from_series(res: Dict[str, np.ndarray], cfg: Config, warmup_s: float) -> np.ndarray:
+    """|aim error| after warm-up (deg) with the leveling controller in the loop."""
+    cl = closed_loop_series(res, cfg)
+    return np.abs(cl["err"][cl["t"] >= warmup_s])
 
 
 def _stats(err: np.ndarray) -> Dict[str, float]:

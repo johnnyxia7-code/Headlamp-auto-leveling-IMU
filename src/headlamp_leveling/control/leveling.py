@@ -17,7 +17,8 @@ Strategy
                 accelerometer tilt is a load change (doors, passengers,
                 luggage): track it directly relative to the tilt at stop entry
     actuator    deadband + slew-rate limit + mechanical range clamp
-    fault       move to the fail-safe position and hold
+    fault       never raise the beam: hold the correction it had when the fault
+                occurred (or the configured fail-safe position, if that is lower)
 """
 
 from __future__ import annotations
@@ -52,6 +53,8 @@ class LevelingController:
         self._stop_ref_tilt: Optional[float] = None
         self._stop_ref_estimate = self.estimate
         self.fault = False
+        self._in_failsafe = False
+        self._failsafe_target = self.position
 
     def _accept(self, est: float, weight: float, dt: float) -> None:
         self.n_accepted += 1
@@ -60,18 +63,29 @@ class LevelingController:
 
     def update(self, dt: float, estimate_deg: float = float("nan"), excitation: float = 0.0,
                standstill: bool = False, tilt_deg: float = float("nan"), fault: bool = False,
-               estimate_std_deg: float = float("nan")) -> ControllerOutput:
+               estimate_std_deg: float = float("nan"), failsafe_request: bool = False) -> ControllerOutput:
         """One controller cycle.
 
         Window estimators pass ``excitation``; the EKF passes ``estimate_std_deg``
         instead, in which case its (already filtered) estimate is used directly
         whenever its 1-sigma is below ``max_estimate_std_deg``.
+
+        ``fault`` latches the fail-safe position for the rest of the drive cycle
+        (unexplained inconsistency). ``failsafe_request`` holds it only while it is
+        set (a sensor outage reported by the input guard): once the sensor is back
+        and the estimate is trustworthy again, leveling resumes.
         """
         c = self.cfg
         self.fault = self.fault or fault
-        if self.fault:
-            self.target = c.failsafe_deg
+        if self.fault or failsafe_request:
+            if not self._in_failsafe:
+                # Never raise the beam on a failure: keep at least the dip it had at that
+                # moment, or go lower if the configured fail-safe position is lower.
+                self._failsafe_target = max(self.position, c.failsafe_deg)
+                self._in_failsafe = True
+            self.target = self._failsafe_target
         else:
+            self._in_failsafe = False
             if np.isfinite(estimate_std_deg):
                 if np.isfinite(estimate_deg) and estimate_std_deg <= c.max_estimate_std_deg:
                     self.estimate = float(estimate_deg)
@@ -92,4 +106,4 @@ class LevelingController:
         step = c.max_rate_deg_s * dt
         self.position += float(np.clip(self.target - self.position, -step, step))
         return ControllerOutput(self.position, self.target, self.estimate,
-                                int(round(self.position * c.steps_per_deg)), self.fault)
+                                int(round(self.position * c.steps_per_deg)), self.fault or failsafe_request)

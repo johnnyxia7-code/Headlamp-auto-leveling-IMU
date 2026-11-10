@@ -49,6 +49,9 @@ def _ideal_cfg(trip_s=360.0):
     cfg.sim.trip_duration_s = trip_s
     cfg.sim.load_change_prob = 0.0
     cfg.camera.noise_deg = cfg.camera.bias_deg = cfg.camera.outlier_prob = 0.0
+    # Noise-free signals are constant at standstill, which the input guard (correctly,
+    # for a real sensor) treats as a frozen channel. These tests are about the filter.
+    cfg.guard.enabled = False
     return cfg
 
 
@@ -129,7 +132,8 @@ def test_sensor_fault_is_flagged():
     raw = copy.deepcopy(simulate_trip(cfg, 6, raw=True)["raw"])
     # Gyro y-axis fails stuck-at +20 deg/s halfway through the trip.
     raw["inputs"][raw["inputs"].shape[0] // 2:, 4] = 20.0
-    res = run_ekf(raw, cfg, use_camera=False)
+    # Without the input guard, the EKF's own residual monitor has to catch it.
+    res = run_ekf(raw, cfg, use_camera=False, guard=False)
     half = res["fault"].size // 2
     assert not res["fault"][:half].any()
     assert res["fault"][half:].any()

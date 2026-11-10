@@ -53,6 +53,12 @@ def _cmd_fuse_eval(a) -> None:
     evaluate_fusion(cfg, a.trips, a.out, a.checkpoint, a.nn_std)
 
 
+def _cmd_robust_eval(a) -> None:
+    from .fusion.robustness import evaluate_robustness
+    cfg = load_config(a.config)
+    evaluate_robustness(cfg, a.trips, a.out, a.scenarios or None)
+
+
 def _cmd_simulate(a) -> None:
     import numpy as np
     from .sim.scenario import simulate_trip
@@ -110,6 +116,13 @@ def main(argv: Optional[List[str]] = None) -> None:
     f.add_argument("--checkpoint", default=None, help="also fuse this window model as a load-pitch measurement")
     f.add_argument("--nn-std", type=float, default=0.35, help="1-sigma assigned to the model output, deg")
     f.set_defaults(func=_cmd_fuse_eval)
+
+    r = sub.add_parser("robust-eval", help="inject sensor faults; compare the EKF with / without the input guard")
+    r.add_argument("-c", "--config", default=None)
+    r.add_argument("-n", "--trips", type=int, default=12)
+    r.add_argument("-o", "--out", default="runs/robustness")
+    r.add_argument("--scenarios", nargs="*", default=None, help="subset of fault scenarios (default: all)")
+    r.set_defaults(func=_cmd_robust_eval)
 
     s = sub.add_parser("simulate", help="simulate one trip and print its scenario")
     s.add_argument("-c", "--config", default=None)

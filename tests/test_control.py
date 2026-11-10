@@ -51,12 +51,21 @@ def test_standstill_tracks_load_change_from_tilt():
     assert out.correction_deg == pytest.approx(est_before + 0.6)
 
 
-def test_fault_moves_to_failsafe_and_latches():
+def test_fault_holds_the_beam_and_latches():
     c = _ctrl(failsafe_deg=0.0, max_rate_deg_s=100.0)
     for _ in range(20):
         c.update(1.0, 1.5, excitation=1.0)
+    held = c.position
+    assert held > 1.0
     out = c.update(1.0, fault=True)
-    assert out.fault and out.correction_deg == 0.0
-    out = c.update(1.0, 1.5, excitation=1.0)
-    assert out.fault and out.correction_deg == 0.0
-    assert out.steps == 0
+    assert out.fault and out.correction_deg == pytest.approx(held)   # beam is not raised
+    out = c.update(1.0, 0.2, excitation=5.0)                          # later estimates are ignored
+    assert out.fault and out.correction_deg == pytest.approx(held)
+
+
+def test_fault_lowers_to_failsafe_position_if_that_is_lower():
+    c = _ctrl(failsafe_deg=2.0, max_rate_deg_s=100.0)
+    for _ in range(20):
+        c.update(1.0, 0.5, excitation=1.0)
+    out = c.update(1.0, fault=True)
+    assert out.correction_deg == pytest.approx(2.0)

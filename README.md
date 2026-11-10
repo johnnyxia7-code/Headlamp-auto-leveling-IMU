@@ -92,9 +92,13 @@ src/headlamp_leveling/
   sim/camera.py         front camera as auxiliary pitch sensor (lane vanishing point)
   fusion/ekf.py         13-state EKF: IMU + wheel speed + camera (+ NN) -> load pitch with sigma
   fusion/run.py         run the EKF on simulated trips, `hal fuse-eval`
+  fusion/input_guard.py resilient sensor-input layer: validity, spikes, stuck, plausibility, health
+  fusion/robustness.py  fault scenarios with / without the guard, `hal robust-eval`
+  sim/faults.py         sensor fault injection (dropouts, spikes, frozen, offset, saturation, ...)
   export.py             TorchScript / ONNX / metadata export
   cli.py                `hal` command line
 docs/ekf_design.md      EKF specification: states, models, Jacobians, tuning, embedded notes
+docs/input_guard.md     input-layer specification: checks, thresholds, health states, reactions
 tests/                  pytest suite
 ```
 
@@ -170,7 +174,10 @@ domain randomisation.
   accelerometer tilt is a load change, for example passengers or luggage. The controller tracks it
   directly.
 - **Actuator.** A 0.05° deadband, a 0.5 °/s slew limit, a −1…+3° range and stepper-step output.
-- **Fault.** The controller moves to the fail-safe position and latches there.
+- **Fault.** The beam is never raised on a fault. The controller holds the correction it had when
+  the fault occurred, or moves down to `failsafe_deg` if that is lower. A sensor outage reported
+  by the input layer ends this state when the sensor is back. A fault from the EKF's residual
+  monitor latches for the drive cycle.
 
 The closed-loop metric is `aim error = true load pitch − applied correction`. A positive error means
 the beam is too high. The evaluation reports it both over the whole trip and after the first full window (120 s).
@@ -219,7 +226,7 @@ the window models' test split.
 | EKF: + camera | 0.071° | 0.236° | 91.8 % | 90.2 % | 0.074° | 0.228° | 83 s |
 | EKF: + NN measurement (TCN) | 0.089° | 0.287° | 91.2 % | 86.7 % | 0.095° | 0.309° | 179 s |
 | EKF: + camera + NN | **0.064°** | **0.192°** | **95.5 %** | **91.5 %** | **0.068°** | **0.204°** | **83 s** |
-| *for comparison: TCN window model (§8)* | 0.143° | 0.435° | 77.8 % | – | 0.159° | 0.569° | – |
+| *for comparison: TCN window model (§9)* | 0.143° | 0.435° | 77.8 % | – | 0.159° | 0.569° | – |
 
 - **The EKF beats the window models.** Even without the camera, its closed-loop error is about 30 %
   lower than the TCN's (0.113° vs. 0.159°). The camera roughly halves the TCN's error (0.074°).
@@ -234,7 +241,45 @@ the window models' test split.
 - **The filter is mildly overconfident.** 87–92 % of errors fall within 2σ, against an ideal of
   95 %. The controller's `max_estimate_std_deg` gate leaves margin for this.
 
-## 8. Results (simulated test split)
+## 8. Resilient sensor input
+
+Every sensor sample passes an input layer (`fusion/input_guard.py`) before the EKF may use it. The
+full specification is in [`docs/input_guard.md`](docs/input_guard.md).
+
+- **Per-sample checks:**
+  - validity (missing, invalid);
+  - range (saturation);
+  - frozen signal;
+  - spikes: a causal Hampel test for the IMU, and a physical rate limit for the wheel speed.
+- **Cross-sensor plausibility**, using only physics that holds for any car and road:
+  - the accelerometer reads `g` at standstill;
+  - the gyros read no rotation at standstill;
+  - no sustained pitch rate while driving;
+  - the vertical accelerometer stays near `g`;
+  - the accelerometer agrees with the wheel-speed derivative;
+  - the body does not shake like a moving car while the wheel speed reads zero.
+- **Health per channel:** OK → DEGRADED → FAILED, with time-based qualification (0.5 s) and
+  healing (2 s; 4 s for the wheel speed).
+- **Reaction:**
+  - Rejected samples reach the EKF as "not available", and the filter skips that update. The
+    guard never holds or extrapolates values.
+  - Losing the gyro, the lateral channel or the camera is a degraded mode: leveling continues.
+  - A critical channel (`ax`, `az`, `v_wheel`) FAILED for 3 s puts the lamp in fail-safe: it
+    holds its position and is never raised. Leveling resumes by itself after the channel heals.
+- **Inside the EKF:**
+  - Huber-weighted updates;
+  - sub-stepped prediction over late samples;
+  - covariance re-opening after gaps and after a persistent gate rejection;
+  - a residual monitor with hysteresis, which keeps watching a faulted camera without using it;
+  - a numerical safety net.
+
+```bash
+hal robust-eval -n 12 -o runs/robustness     # 13 fault scenarios, guard off vs. on
+```
+
+<!-- robustness results -->
+
+## 9. Results (simulated test split)
 
 These are results for the window models (TCN, hybrid) and the physics baseline on the simulated
 test split: 80 unseen trips (13.3 h), each 10 min long, with 7,760 windows. The models were trained
@@ -278,7 +323,7 @@ What these numbers show:
 
 The full per-category tables are in `runs/<arch>/eval_test/report.md`.
 
-## 9. Using real vehicle data
+## 10. Using real vehicle data
 
 The simulator only provides the starting point. Close the sim-to-real gap with logs from an
 instrumented reference vehicle.
@@ -301,7 +346,7 @@ instrumented reference vehicle.
 5. Re-fit the simulator ranges in `configs/*.yaml` (axle rates, pitch gradient, IMU noise) to the
    measured vehicle so the synthetic data stays useful for rare cases.
 
-## 10. Deployment notes
+## 11. Deployment notes
 
 - **MCU budget.** The GRU (~32 k parameters) is the cheapest model to deploy. Its streaming
   form needs no 120 s window buffer. The TCN and hybrid models fit in int8 within ~150 kB of flash.
@@ -314,12 +359,14 @@ instrumented reference vehicle.
   latched fail-safe position.
 - **End-of-line.** Calibrate the IMU mounting pitch together with the headlamp aim. Residual
   misalignment adds directly to the error (simulated at 0.05° 1σ).
+- **Input layer on target.** See [`docs/input_guard.md`](docs/input_guard.md) §9 for the
+  thresholds that must be calibrated per vehicle (idle vibration, bus period, spike floors).
 - **EKF on target.** See [`docs/ekf_design.md`](docs/ekf_design.md) §11: about 0.35 MMAC/s at
   50 Hz, about 1 kB of RAM, and notes on single precision.
 - **NVM.** Store the last fused estimate at ignition-off and restore it at start, so the lamps are
   correct before the first excitation.
 
-## 11. Limitations / next steps
+## 12. Limitations / next steps
 
 - The vehicle model is planar (pitch, heave, simplified roll). There is no tyre or suspension
   kinematic coupling, and no anti-squat or anti-dive geometry beyond the pitch gradient.

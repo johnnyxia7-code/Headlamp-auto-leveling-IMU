@@ -25,3 +25,4 @@ jobs:
           hal evaluate runs/quick/model.pt
           hal export runs/quick/model.pt --no-onnx
           hal fuse-eval -c configs/quick.yaml -n 2 -o runs/quick_fusion
+          hal robust-eval -c configs/quick.yaml -n 1 --scenarios none spikes gyro_stuck imu_outage -o runs/quick_robust

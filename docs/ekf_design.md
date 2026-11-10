@@ -229,6 +229,11 @@ would be explained as body pitch.
 
 ## 8. Robustness and diagnostics
 
+The model-free input checks in front of the filter, and the filter's handling of
+missing data, gaps and sensor recovery, are specified in
+[`input_guard.md`](input_guard.md). This section covers the filter's own
+statistical checks.
+
 - **Innovation gating.** Each scalar update computes `NIS = ν²/S`. Camera and NN
   measurements use the χ²(1) 99.9 % gate (10.8). The IMU and wheel speed use a
   loose gate (30) that only rejects gross errors.
@@ -239,8 +244,8 @@ would be explained as body pitch.
   warm-up, while the filter is still converging.
 - **Fault classes.**
   - *Critical:* `acc_x`, `acc_z`, gyro and wheel speed. A fault here sets
-    `critical_fault`. The controller then moves to the fail-safe position and
-    latches there.
+    `critical_fault`. The controller then holds the lamp (the beam is never raised)
+    and latches that state.
   - *Auxiliary:* camera and NN. A fault here only disables that input; the IMU and
     wheel-speed filter carries on.
 
