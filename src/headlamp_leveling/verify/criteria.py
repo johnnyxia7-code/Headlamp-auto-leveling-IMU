@@ -137,6 +137,23 @@ class LampQuiet(Criterion):
 
 
 @dataclass
+class AimWithin(Criterion):
+    """The aim error must stay inside a band during a phase."""
+    t0: float
+    t1: float
+    tol_deg: float = 0.25
+    what: str = "phase"
+    name = "aim held"
+
+    def evaluate(self, d: RunData) -> CheckResult:
+        m = (d.t >= self.t0) & (d.t <= self.t1)
+        worst = float(np.abs(d.err[m]).max()) if m.any() else float("nan")
+        return CheckResult(f"{self.name} ({self.what})",
+                           f"|aim error| ≤ {self.tol_deg}° throughout {self.what} ({self.t0:.0f}–{self.t1:.0f} s)",
+                           f"max {worst:.3f}°", bool(worst <= self.tol_deg))
+
+
+@dataclass
 class LoadStepTracked(Criterion):
     t_event: float
     within_s: float = 12.0

@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from ..sim.halfcar import HalfCarParams, ScriptedDrive, speed_profile
-from .criteria import (ActuatorTravel, BeamNotRaised, Consistent, Converges, Criterion, FaultDetected, LampQuiet,
+from .criteria import (ActuatorTravel, AimWithin, BeamNotRaised, Consistent, Converges, Criterion, FaultDetected, LampQuiet,
                        LevelingContinues, LoadStepTracked, NoFailsafe, NoGlare, NumericallySound, Recovers,
                        SteadyAccuracy)
 
@@ -118,10 +118,12 @@ def hill_route() -> VerifyScenario:
     grade = [(0, 0), (400, 0), (500, 8), (900, 8), (1000, 0), (1100, -8), (1500, -8), (1600, 0), (4000, 0)]
     return VerifyScenario(
         "hill_route", "8 % climb and descent, driver only",
-        "Grade immunity. A slope tilts the accelerometer exactly as a load would. With no load on board "
-        "the lamp must stay where it is while the car climbs, crests, descends and brakes on the slope.",
+        "Grade handling. A slope tilts the accelerometer exactly as a load would, and the filter must not "
+        "mistake one for the other. A slope also really pitches the body relative to the road (load "
+        "transfer, about ±0.15° here), and that part the lamp should follow. The aim error against the "
+        "true pitch to the road must stay small while the car climbs, crests, descends and brakes.",
         ScriptedDrive(s.manoeuvres, grade=grade, loads=[(0.0, "driver_only")]),
-        _nominal() + [LampQuiet(30.0, t["_end"][0], 0.20, "the whole hill route")])
+        _nominal() + [AimWithin(30.0, t["_end"][0], 0.25, "the whole hill route")])
 
 
 def parked_on_slope_loading() -> VerifyScenario:

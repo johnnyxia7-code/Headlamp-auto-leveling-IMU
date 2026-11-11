@@ -26,3 +26,4 @@ jobs:
           hal export runs/quick/model.pt --no-onnx
           hal fuse-eval -c configs/quick.yaml -n 2 -o runs/quick_fusion
           hal robust-eval -c configs/quick.yaml -n 1 --scenarios none spikes gyro_stuck imu_outage -o runs/quick_robust
+          hal verify --no-plots --scenario city_loaded hill_route fault_wheel_speed_zero -o runs/quick_verify
