@@ -66,7 +66,8 @@ def _cmd_verify(a) -> None:
             sc = make()
             print(f"{name:26s} [{sc.group}] {sc.title}")
         return
-    report = verify(load_config(a.config), a.scenario or None, a.out, plots=not a.no_plots, seed=a.seed)
+    report = verify(load_config(a.config), a.scenario or None, a.out, plots=not a.no_plots, seed=a.seed,
+                    n_seeds=a.seeds)
     if a.strict and report["passed"] < report["total"]:
         sys.exit(1)
 
@@ -142,7 +143,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     v.add_argument("--scenario", nargs="*", default=None, help="scenario names (default: all)")
     v.add_argument("--list", action="store_true", help="list the scenarios and exit")
     v.add_argument("--no-plots", action="store_true", help="skip the PNG time-series plots (no matplotlib needed)")
-    v.add_argument("--seed", type=int, default=0, help="sensor-noise and road-profile seed")
+    v.add_argument("--seed", type=int, default=0, help="first seed (sensor errors, camera bias, road profile)")
+    v.add_argument("--seeds", type=int, default=1, help="number of seeds to run each scenario with")
     v.add_argument("--strict", action="store_true", help="exit with status 1 if any scenario fails")
     v.set_defaults(func=_cmd_verify)
 

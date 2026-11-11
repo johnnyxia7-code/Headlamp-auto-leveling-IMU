@@ -51,65 +51,88 @@ def run_scenario(sc: VerifyScenario, cfg: Config, seed: int = 0) -> Dict:
 
 
 def verify(cfg: Config, names: Optional[Sequence[str]] = None, out_dir: Optional[str] = None,
-           plots: bool = True, seed: int = 0, verbose: bool = True) -> Dict:
-    """Run the selected scenarios (default: all), write the report and optional plots."""
+           plots: bool = True, seed: int = 0, n_seeds: int = 1, verbose: bool = True) -> Dict:
+    """Run the selected scenarios (default: all), write the report and optional plots.
+
+    With ``n_seeds`` > 1 every scenario is repeated with seeds ``seed .. seed + n_seeds - 1``.
+    The seed draws the sensor errors (biases, mounting misalignment, noise), the camera
+    bias and the road profile, so this shows how robust each verdict is. Plots and the
+    detailed check tables are for the first seed.
+    """
     names = list(names) if names else list(SCENARIOS)
     unknown = [n for n in names if n not in SCENARIOS]
     if unknown:
         raise KeyError(f"unknown scenario(s) {unknown}; choose from {sorted(SCENARIOS)}")
     out = Path(out_dir or "runs/verify")
     out.mkdir(parents=True, exist_ok=True)
-    results: List[Dict] = []
+    seeds = [seed + i for i in range(max(1, n_seeds))]
+    scenarios: List[Dict] = []
     for name in names:
-        r = run_scenario(SCENARIOS[name](), cfg, seed)
-        results.append(r)
-        if plots:
-            from .plots import plot_scenario
-            plot_scenario(r, out / f"{name}.png")
+        runs = []
+        for k, sd in enumerate(seeds):
+            r = run_scenario(SCENARIOS[name](), cfg, sd)
+            if k == 0:
+                first = r
+                if plots:
+                    from .plots import plot_scenario
+                    plot_scenario(r, out / f"{name}.png")
+            runs.append({"seed": sd, "passed": bool(r["passed"]),
+                         "checks": [{"name": c.name, "requirement": c.requirement, "measured": c.measured,
+                                     "passed": bool(c.passed)} for c in r["checks"]]})
+        n_pass = sum(x["passed"] for x in runs)
+        scenarios.append({
+            "name": name, "title": first["scenario"].title, "group": first["scenario"].group,
+            "purpose": first["scenario"].purpose, "passed": n_pass == len(runs), "seeds_passed": n_pass,
+            "duration_s": float(first["data"].t_raw[-1]), "checks": runs[0]["checks"], "runs": runs,
+        })
         if verbose:
-            n_ok = sum(c.passed for c in r["checks"])
-            print(f"[verify] {'PASS' if r['passed'] else 'FAIL'}  {name:26s} {n_ok}/{len(r['checks'])} checks",
-                  flush=True)
-            for c in r["checks"]:
-                if not c.passed:
-                    print(f"           x {c.name}: {c.measured}  (required: {c.requirement})", flush=True)
+            tag = "PASS" if n_pass == len(runs) else "FAIL"
+            print(f"[verify] {tag}  {name:26s} {n_pass}/{len(runs)} seeds", flush=True)
+            for x in runs:
+                for c in x["checks"]:
+                    if not c["passed"]:
+                        print(f"           x seed {x['seed']}: {c['name']}: {c['measured']}", flush=True)
 
-    report = {
-        "seed": seed,
-        "passed": sum(r["passed"] for r in results),
-        "total": len(results),
-        "scenarios": [{
-            "name": r["scenario"].name, "title": r["scenario"].title, "group": r["scenario"].group,
-            "purpose": r["scenario"].purpose, "passed": bool(r["passed"]),
-            "duration_s": float(r["data"].t_raw[-1]),
-            "checks": [{"name": c.name, "requirement": c.requirement, "measured": c.measured,
-                        "passed": bool(c.passed)} for c in r["checks"]],
-        } for r in results],
-    }
+    report = {"seeds": seeds, "passed": sum(s["passed"] for s in scenarios), "total": len(scenarios),
+              "scenarios": scenarios}
     with open(out / "report.json", "w", encoding="utf-8") as fh:
         json.dump(report, fh, indent=2, ensure_ascii=False)
     (out / "report.md").write_text(render_markdown(report, plots), encoding="utf-8")
     if verbose:
-        print(f"[verify] {report['passed']}/{report['total']} scenarios passed -> {out / 'report.md'}")
+        print(f"[verify] {report['passed']}/{report['total']} scenarios pass with every seed "
+              f"-> {out / 'report.md'}")
     return report
 
 
 def render_markdown(report: Dict, plots: bool = True) -> str:
+    n = len(report["seeds"])
     lines = ["# Verification report", "",
              "Plant: half-car model (`sim/halfcar.py`), independent of the filter's internal model. ",
              "Chain under test: input layer → EKF → leveling controller → lamp.", "",
-             f"**{report['passed']} of {report['total']} scenarios pass all their checks.**", "",
-             "| Scenario | Group | Result | Checks | Failed checks |", "|---|---|---|---|---|"]
+             f"Each scenario was run with {n} seed{'s' if n > 1 else ''} "
+             f"({', '.join(str(x) for x in report['seeds'])}). The seed draws the sensor errors, the camera "
+             "bias and the road profile.", "",
+             f"**{report['passed']} of {report['total']} scenarios pass all their checks with every seed.**", "",
+             "| Scenario | Group | Seeds passed | Checks that failed (seeds) |", "|---|---|---|---|"]
     for s in report["scenarios"]:
-        failed = [c["name"] for c in s["checks"] if not c["passed"]]
-        lines.append(f"| [{s['title']}](#{s['name']}) | {s['group']} | {'PASS' if s['passed'] else '**FAIL**'} "
-                     f"| {sum(c['passed'] for c in s['checks'])}/{len(s['checks'])} | {', '.join(failed) or '–'} |")
+        failed: Dict[str, List[int]] = {}
+        for run in s["runs"]:
+            for c in run["checks"]:
+                if not c["passed"]:
+                    failed.setdefault(c["name"], []).append(run["seed"])
+        txt = "; ".join(f"{k} ({', '.join(map(str, v))})" for k, v in failed.items()) or "–"
+        mark = f"{s['seeds_passed']}/{n}" if s["passed"] else f"**{s['seeds_passed']}/{n}**"
+        lines.append(f"| [{s['title']}](#{s['name']}) | {s['group']} | {mark} | {txt} |")
     for s in report["scenarios"]:
-        lines += ["", f"## {s['name']}", "", f"**{s['title']}** ({s['duration_s']:.0f} s)", "", s["purpose"], "",
-                  "| Check | Requirement | Measured | Result |", "|---|---|---|---|"]
-        for c in s["checks"]:
-            lines.append(f"| {c['name']} | {c['requirement']} | {c['measured']} | "
-                         f"{'pass' if c['passed'] else '**FAIL**'} |")
+        lines += ["", f"## {s['name']}", "", f"**{s['title']}** ({s['duration_s']:.0f} s)", "", s["purpose"], ""]
+        header = "| Check | Requirement | " + " | ".join(f"Seed {x}" for x in report["seeds"]) + " |"
+        lines += [header, "|---|---|" + "---|" * n]
+        for i, c in enumerate(s["checks"]):
+            cells = []
+            for run in s["runs"]:
+                rc = run["checks"][i]
+                cells.append(rc["measured"] if rc["passed"] else f"**{rc['measured']} (fail)**")
+            lines.append(f"| {c['name']} | {c['requirement']} | " + " | ".join(cells) + " |")
         if plots:
-            lines += ["", f"![{s['name']}]({s['name']}.png)"]
+            lines += ["", f"Seed {report['seeds'][0]}:", "", f"![{s['name']}]({s['name']}.png)"]
     return "\n".join(lines) + "\n"

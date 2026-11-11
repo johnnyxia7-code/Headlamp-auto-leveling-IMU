@@ -33,8 +33,11 @@ def _num_jac(f, x, eps=1e-6):
 
 
 @pytest.mark.parametrize("seed", [0, 1, 2])
-def test_jacobians_match_finite_differences(seed):
+@pytest.mark.parametrize("accel", [1.2, -2.0])
+def test_jacobians_match_finite_differences(seed, accel):
     x = _random_state(np.random.default_rng(seed))
+    x[A] = accel                     # traction and braking use different pitch-gradient states
+    x[13] = 0.003
     _, F = propagate(x, 0.02, 2 * np.pi * 1.4, 0.4, 5.0)
     np.testing.assert_allclose(F, _num_jac(lambda z: propagate(z, 0.02, 2 * np.pi * 1.4, 0.4, 5.0)[0], x),
                                atol=1e-7)

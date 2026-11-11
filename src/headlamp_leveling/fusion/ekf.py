@@ -3,7 +3,7 @@
 The full derivation, tuning rationale and embedded notes are in
 ``docs/ekf_design.md``. Units inside the filter are SI (m, s, rad).
 
-State vector (13)::
+State vector (14)::
 
     0  v       vehicle speed along the road                    m/s
     1  a       acceleration along the road                     m/s^2
@@ -18,6 +18,7 @@ State vector (13)::
     10 bgy     gyro y bias                                     rad/s
     11 sw      wheel-speed scale factor (tyre radius)          -
     12 bcam    camera pitch extrinsic bias                     rad
+    13 kpb     pitch gradient under braking (dive)             rad/(m/s^2)
 
 Process model (Euler-discretised, dt = 1 / fs)::
 
@@ -27,7 +28,7 @@ Process model (Euler-discretised, dt = 1 / fs)::
     gamr' = gamr (1 - dt / tau)                 + w_curv   (variance ~ distance travelled)
     ths'  = ths                                 + w_load   (large only at standstill)
     thd'  = thd + thdr dt
-    thdr' = thdr + (wn^2 (kp a - thd) - 2 zeta wn thdr) dt + w_road
+    thdr' = thdr + (wn^2 (k a - thd) - 2 zeta wn thdr) dt + w_road     k = kp if a >= 0 else kpb
     kp, bax, baz, bgy, sw, bcam: random walks
 
 Measurement models (theta = ths + thd, phi = gam + theta)::
@@ -78,9 +79,9 @@ import numpy as np
 from .. import G
 from ..config import FusionConfig
 
-N_STATES = 13
-V, A, GAM, GAMR, THS, THD, THDR, KP, BAX, BAZ, BGY, SW, BCAM = range(N_STATES)
-STATE_NAMES = ("v", "a", "gam", "gamr", "ths", "thd", "thdr", "kp", "bax", "baz", "bgy", "sw", "bcam")
+N_STATES = 14
+V, A, GAM, GAMR, THS, THD, THDR, KP, BAX, BAZ, BGY, SW, BCAM, KPB = range(N_STATES)
+STATE_NAMES = ("v", "a", "gam", "gamr", "ths", "thd", "thdr", "kp", "bax", "baz", "bgy", "sw", "bcam", "kpb")
 SENSORS = ("acc_x", "acc_z", "gyro", "wheel", "camera", "nn")
 CRITICAL_SENSORS = ("acc_x", "acc_z", "gyro", "wheel")   # a fault here -> lamp fail-safe
 AUX_SENSORS = ("camera", "nn")                            # a fault here -> input disabled
@@ -94,9 +95,17 @@ MG = 1e-3 * G
 # (tests/test_fusion.py) and ported 1:1 to the embedded implementation.
 
 def propagate(x: np.ndarray, dt: float, wn: float, zeta: float, grade_tau: float):
-    """Process model f(x) and its Jacobian F = df/dx."""
+    """Process model f(x) and its Jacobian F = df/dx.
+
+    Squat (traction) and dive (braking) have separate pitch gradients, ``kp`` and
+    ``kpb``: suspension geometry gives real cars different anti-squat and anti-dive.
+    With a single gradient the difference showed up as a load-pitch bias of about
+    0.05 deg on the verification plant.
+    """
     w2, c2 = wn * wn, 2.0 * zeta * wn
-    v, a, gamr, thd, thdr, kp = x[V], x[A], x[GAMR], x[THD], x[THDR], x[KP]
+    v, a, gamr, thd, thdr = x[V], x[A], x[GAMR], x[THD], x[THDR]
+    k_idx = KP if a >= 0.0 else KPB
+    kp = x[k_idx]
     xn = x.copy()
     xn[V] = v + a * dt
     xn[GAM] = x[GAM] + gamr * dt
@@ -111,7 +120,7 @@ def propagate(x: np.ndarray, dt: float, wn: float, zeta: float, grade_tau: float
     F[THDR, A] = w2 * kp * dt
     F[THDR, THD] = -w2 * dt
     F[THDR, THDR] = 1.0 - c2 * dt
-    F[THDR, KP] = w2 * a * dt
+    F[THDR, k_idx] = w2 * a * dt
     return xn, F
 
 
@@ -194,14 +203,14 @@ class PitchEKF:
         lp_std = c.init_load_pitch_std_deg if load_pitch_std_deg is None else load_pitch_std_deg
         self.x = np.zeros(N_STATES)
         self.x[THS] = lp * D2R
-        self.x[KP] = self.kp_nominal
+        self.x[KP] = self.x[KPB] = self.kp_nominal
         self.x[SW] = 1.0
         sd = np.zeros(N_STATES)
         sd[V], sd[A] = 0.5, 0.5
         sd[GAM], sd[GAMR] = 8.0 * D2R, 0.01
         sd[THS] = lp_std * D2R
         sd[THD], sd[THDR] = 0.2 * D2R, 0.5 * D2R
-        sd[KP] = c.pitch_gradient_rel_std * self.kp_nominal
+        sd[KP] = sd[KPB] = c.pitch_gradient_rel_std * self.kp_nominal
         sd[BAX] = sd[BAZ] = c.init_accel_bias_mg * MG
         sd[BGY] = c.init_gyro_bias_dps * D2R
         sd[SW] = c.init_wheel_scale_std
@@ -227,6 +236,7 @@ class PitchEKF:
         self._updated: set = set()
         self._imu_gap_s = 0.0
         self._wheel_gap_s = 0.0
+        self._gyro_gap_s = 0.0
         self._monitor_holdoff_s = 0.0
         self._delay: Deque[tuple] = deque(maxlen=5)
         self._gate_run = {s: 0 for s in CRITICAL_SENSORS}
@@ -294,7 +304,7 @@ class PitchEKF:
             q[GAMR] = c.q_grade_curv ** 2 * max(speed, 0.5)       # per metre travelled
         q[THS] = (c.q_load_pitch_stop_deg if self._load_event else c.q_load_pitch_drive_deg) ** 2 * D2R ** 2
         q[THDR] = (c.q_pitch_dyn_rate * max(speed, 1.0)) ** 2
-        q[KP] = (1e-3 * self.kp_nominal) ** 2
+        q[KP] = q[KPB] = (1e-3 * self.kp_nominal) ** 2
         q[BAX] = q[BAZ] = (c.q_accel_bias_mg * MG) ** 2
         q[BGY] = (c.q_gyro_bias_dps * D2R) ** 2
         q[SW] = 1e-5 ** 2
@@ -478,6 +488,19 @@ class PitchEKF:
             self.P[GAM, GAM] += (0.01 * t) ** 2
             self._prev_meas = None
         self._imu_gap_s = 0.0 if imu_now else self._imu_gap_s + dt
+        # The pitch gradients are observed through the gyro (how far the body pitches per
+        # unit acceleration). Without it they are not separable from the load pitch, so
+        # they are held at their last values until the gyro is back.
+        if np.isfinite(gy_dps):
+            if self._gyro_gap_s > 1.0:
+                for idx in (KP, KPB):
+                    self.P[idx, idx] = (0.2 * self.kp_nominal) ** 2
+            self._gyro_gap_s = 0.0
+        else:
+            self._gyro_gap_s += dt
+            if self._gyro_gap_s > 1.0:
+                for idx in (KP, KPB):
+                    self._reopen(idx, 1e-3 * self.kp_nominal)
         # Same for the speed after a wheel-speed gap: it was integrated from an
         # acceleration that is only known up to the grade / bias ambiguity.
         if wheel_ok and self._wheel_gap_s > 0.0:
@@ -522,7 +545,8 @@ class PitchEKF:
         verification plant's sedan, -0.5 deg on its soft SUV).
 
         The pitch acceleration comes from the gyro (model-free, so it also holds for
-        a vehicle the filter was not tuned for). It is the slope of a least-squares
+        a vehicle the filter was not tuned for). Without a gyro there is no
+        compensation, which is part of the degraded mode. It is the slope of a least-squares
         line through five gyro samples, centred on the sample being compensated. The
         whole measurement set is therefore processed two samples (40 ms) late, which
         is irrelevant for leveling. A plain difference of two or three samples must
@@ -542,10 +566,11 @@ class PitchEKF:
         g = [smp[2] for smp in self._delay]
         if all(np.isfinite(g)) and dt > 0.0:
             thdd = -(-2.0 * g[0] - g[1] + g[3] + 2.0 * g[4]) * D2R / (10.0 * dt)     # nose-up positive
-        elif self.initialized:          # gyro gap: fall back to the filter's squat / dive model
-            x = self.x
-            thdd = self.wn ** 2 * (x[KP] * x[A] - x[THD]) - 2.0 * self.zeta * self.wn * x[THDR]
         else:
+            # No gyro: leave the lever-arm term in. Predicting it from the filter's own
+            # squat / dive states was tried and is worse (0.5 deg instead of 0.14 deg on
+            # the verification plant): those states are poorly known without the gyro,
+            # and feeding them back into the measurement closes a loop.
             thdd = 0.0
         return (ax + c.imu_lever_z_m * thdd, az - c.imu_lever_x_m * thdd, gy_c, v_wheel, camera_pitch_deg,
                 ay, gz_dps)
