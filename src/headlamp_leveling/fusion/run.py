@@ -238,59 +238,79 @@ def nn_load_pitch_measurements(trip: Dict, ckpt: Dict, fusion_fs: float, period_
     return {int(round((e + 1) / fs * fusion_fs)) - 1: (float(p), std_deg) for e, p in zip(ends, preds)}
 
 
-def evaluate_fusion(cfg: Config, n_trips: int = 20, out_dir: Optional[str] = None,
-                    checkpoint: Optional[str] = None, nn_std_deg: float = 0.35,
-                    verbose: bool = True) -> Dict:
-    """Compare fusion variants on the first ``n_trips`` trips of the test split (same seeds)."""
-    root = np.random.SeedSequence(cfg.dataset.seed)
-    test_seeds = root.spawn(3)[2].spawn(max(n_trips, cfg.dataset.n_test_trips))[:n_trips]
-    warmup = cfg.dataset.window_s
-    ckpt = None
+_FUSION_VARIANTS = ("ekf_imu_wheel", "ekf_imu_wheel_camera")
+_FUSION_VARIANTS_NN = ("ekf_imu_wheel_nn", "ekf_imu_wheel_camera_nn")
+
+
+def _fusion_trip(args) -> Dict:
+    """All fusion variants on one test trip (runs in a worker process)."""
+    cfg, i, seed, checkpoint, nn_std_deg, warmup = args
+    trip = simulate_trip(cfg, seed, raw=True)
+    raw = trip["raw"]
+    names = list(_FUSION_VARIANTS)
+    meas = None
     if checkpoint:
         from ..training.train import load_checkpoint
         ckpt = load_checkpoint(checkpoint)
+        meas = nn_load_pitch_measurements(trip, ckpt, cfg.fusion.fs_hz, warmup / 2.0, nn_std_deg)
+        names += list(_FUSION_VARIANTS_NN)
+    out: Dict = {"i": i, "label": f"{trip['meta']['load_case']}, {trip['meta']['grade_class']}", "variants": {}}
+    for name in names:
+        res = run_ekf(raw, cfg, use_camera="camera" in name, load_pitch_meas=meas if name.endswith("_nn") else None)
+        fs = res["fs_hz"]
+        err = res["load_pitch_deg"] - res["true_load_pitch_deg"]
+        after = np.arange(err.size) / fs >= warmup
+        v = {"est_err": err[after],
+             "grade_err": (res["road_grade_deg"] - res["true_road_grade_deg"])[after],
+             "z": err[after] / np.maximum(res["load_pitch_std_deg"][after], 1e-6),
+             "cl_err": closed_loop_from_series(res, cfg, warmup), "conv": None,
+             "cam_frames": float(res["camera_frames"].mean())}
+        # Convergence from a wrong initial value: only trips whose load differs from the
+        # filter's initial value by >= 0.3 deg; first time the error stays within 0.2 deg for 30 s.
+        if abs(res["true_load_pitch_deg"][0] - cfg.fusion.init_load_pitch_deg) >= 0.3:
+            ok = np.abs(err) <= 0.2
+            hold = int(30 * fs)
+            run = np.convolve(ok.astype(float), np.ones(hold), mode="valid") >= hold
+            v["conv"] = float(np.argmax(run) / fs) if run.any() else float("inf")
+        out["variants"][name] = v
+    return out
 
-    variants: Dict[str, Callable] = {
-        "ekf_imu_wheel": lambda raw, trip: run_ekf(raw, cfg, use_camera=False),
-        "ekf_imu_wheel_camera": lambda raw, trip: run_ekf(raw, cfg, use_camera=True),
-    }
-    if ckpt is not None:
-        def with_nn(raw, trip, cam):
-            meas = nn_load_pitch_measurements(trip, ckpt, cfg.fusion.fs_hz, warmup / 2.0, nn_std_deg)
-            return run_ekf(raw, cfg, use_camera=cam, load_pitch_meas=meas)
-        variants["ekf_imu_wheel_nn"] = lambda raw, trip: with_nn(raw, trip, False)
-        variants["ekf_imu_wheel_camera_nn"] = lambda raw, trip: with_nn(raw, trip, True)
 
-    est_err: Dict[str, List[np.ndarray]] = {k: [] for k in variants}
-    grade_err: Dict[str, List[np.ndarray]] = {k: [] for k in variants}
-    cl_err: Dict[str, List[np.ndarray]] = {k: [] for k in variants}
-    z_scores: Dict[str, List[np.ndarray]] = {k: [] for k in variants}
-    conv_time: Dict[str, List[float]] = {k: [] for k in variants}
-    cam_frames = 0.0
-    for i, seed in enumerate(test_seeds):
-        trip = simulate_trip(cfg, seed, raw=True)
-        raw = trip["raw"]
-        for name, fn in variants.items():
-            res = fn(raw, trip)
-            fs = res["fs_hz"]
-            err = res["load_pitch_deg"] - res["true_load_pitch_deg"]
-            after = np.arange(err.size) / fs >= warmup
-            est_err[name].append(err[after])
-            grade_err[name].append((res["road_grade_deg"] - res["true_road_grade_deg"])[after])
-            z_scores[name].append(err[after] / np.maximum(res["load_pitch_std_deg"][after], 1e-6))
-            cl_err[name].append(closed_loop_from_series(res, cfg, warmup))
-            # Convergence from a wrong initial value: only trips whose load differs from the
-            # filter's initial value by >= 0.3 deg; first time the error stays within 0.2 deg for 30 s.
-            if abs(res["true_load_pitch_deg"][0] - cfg.fusion.init_load_pitch_deg) >= 0.3:
-                ok = np.abs(err) <= 0.2
-                hold = int(30 * fs)
-                run = np.convolve(ok.astype(float), np.ones(hold), mode="valid") >= hold
-                conv_time[name].append(float(np.argmax(run) / fs) if run.any() else float("inf"))
-            if name == "ekf_imu_wheel_camera":
-                cam_frames += float(res["camera_frames"].mean())
+def evaluate_fusion(cfg: Config, n_trips: int = 20, out_dir: Optional[str] = None,
+                    checkpoint: Optional[str] = None, nn_std_deg: float = 0.35,
+                    verbose: bool = True, workers: int = 0) -> Dict:
+    """Compare fusion variants on the first ``n_trips`` trips of the test split (same seeds)."""
+    import multiprocessing as mp
+    import os
+    root = np.random.SeedSequence(cfg.dataset.seed)
+    test_seeds = root.spawn(3)[2].spawn(max(n_trips, cfg.dataset.n_test_trips))[:n_trips]
+    warmup = cfg.dataset.window_s
+    jobs = [(cfg, i, s, checkpoint, nn_std_deg, warmup) for i, s in enumerate(test_seeds)]
+    workers = workers or min(os.cpu_count() or 1, n_trips)
+    results: List[Dict] = []
+
+    def done(r: Dict) -> None:
+        results.append(r)
         if verbose:
-            print(f"[fusion] trip {i + 1}/{n_trips} ({trip['meta']['load_case']}, {trip['meta']['grade_class']})",
-                  flush=True)
+            print(f"[fusion] trip {len(results)}/{n_trips} ({r['label']})", flush=True)
+
+    if workers > 1:
+        with mp.get_context("spawn").Pool(workers) as pool:
+            for r in pool.imap_unordered(_fusion_trip, jobs):
+                done(r)
+    else:
+        for job in jobs:
+            done(_fusion_trip(job))
+    results.sort(key=lambda r: r["i"])
+
+    variants = list(results[0]["variants"])
+    est_err = {k: [r["variants"][k]["est_err"] for r in results] for k in variants}
+    grade_err = {k: [r["variants"][k]["grade_err"] for r in results] for k in variants}
+    cl_err = {k: [r["variants"][k]["cl_err"] for r in results] for k in variants}
+    z_scores = {k: [r["variants"][k]["z"] for r in results] for k in variants}
+    conv_time = {k: [r["variants"][k]["conv"] for r in results if r["variants"][k]["conv"] is not None]
+                 for k in variants}
+    cam_frames = sum(r["variants"]["ekf_imu_wheel_camera"]["cam_frames"] for r in results)
 
     report: Dict = {"trips": n_trips, "warmup_s": warmup,
                     "camera_frame_fraction": cam_frames / max(n_trips, 1), "variants": {}}

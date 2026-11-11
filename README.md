@@ -195,7 +195,7 @@ notes, is in [`docs/ekf_design.md`](docs/ekf_design.md).
   - speed and acceleration;
   - road grade and grade rate;
   - static load pitch;
-  - dynamic pitch and pitch rate, plus the online pitch gradient;
+  - dynamic pitch and pitch rate, plus two online pitch gradients (squat and dive);
   - accelerometer x/z and gyro biases;
   - tyre-radius scale;
   - camera mounting bias.
@@ -220,20 +220,26 @@ hal fuse-eval -c configs/default.yaml -n 40 -o runs/fusion                     #
 hal fuse-eval -c configs/default.yaml -n 40 --checkpoint runs/tcn/model.pt     # + NN measurement
 ```
 
-Results on 40 simulated test trips, measured after the first 120 s. These are the same trips as
-the window models' test split.
+Results on 40 trips of the training simulator, measured after the first 120 s. These are the same
+trips as the window models' test split, run with the current code (input layer on). Results on the
+independent verification plant are in §9.
 
 | Variant | Load pitch MAE | P95 | within 0.2° | within 2σ | Closed-loop MAE | Closed-loop P95 | Convergence P90 |
 |---|---|---|---|---|---|---|---|
-| EKF: IMU + wheel speed | 0.106° | 0.449° | 87.0 % | 86.7 % | 0.113° | 0.467° | 409 s |
-| EKF: + camera | 0.071° | 0.236° | 91.8 % | 90.2 % | 0.074° | 0.228° | 83 s |
-| EKF: + NN measurement (TCN) | 0.089° | 0.287° | 91.2 % | 86.7 % | 0.095° | 0.309° | 179 s |
-| EKF: + camera + NN | **0.064°** | **0.192°** | **95.5 %** | **91.5 %** | **0.068°** | **0.204°** | **83 s** |
+| EKF: IMU + wheel speed | 0.114° | 0.414° | 85.6 % | 85.1 % | 0.121° | 0.447° | 409 s |
+| EKF: + camera | 0.086° | 0.273° | 89.5 % | 87.8 % | 0.089° | 0.285° | 83 s |
+| EKF: + NN measurement (TCN) | 0.092° | 0.264° | 91.2 % | 87.4 % | 0.099° | 0.282° | 200 s |
+| EKF: + camera + NN | **0.076°** | **0.211°** | **94.4 %** | **89.6 %** | **0.081°** | **0.227°** | **83 s** |
 | *for comparison: TCN window model (§10)* | 0.143° | 0.435° | 77.8 % | – | 0.159° | 0.569° | – |
 
-- **The EKF beats the window models.** Even without the camera, its closed-loop error is about 30 %
-  lower than the TCN's (0.113° vs. 0.159°). The camera roughly halves the TCN's error (0.074°).
-  Fusing all three gives the best result, with 98 % of the time within 0.5 % aim error.
+- **The EKF beats the window models.** Even without the camera, its closed-loop error is about a
+  quarter lower than the TCN's (0.121° vs. 0.159°). With the camera it is 0.089°. Fusing all three
+  gives the best result, with 97.5 % of the time within 0.5 % aim error.
+- **These numbers are about 0.01° worse than before the input layer was added.** The cause is the
+  camera fault monitor: tuned to reject a wrong camera within about 5 s, it also distrusts a
+  correct camera on an occasional trip. The median trip is unaffected. A slower monitor recovers
+  the 0.01° but lets a wrong camera pull the estimate by up to 0.75° (see
+  [`docs/verification.md`](docs/verification.md)).
 - **The camera mainly speeds up convergence from a wrong initial value.** Convergence is measured
   on the 22 trips that start at least 0.3° away from the filter's initial value. The 90th-percentile
   time is 83 s with the camera and 409 s without it. Camera frames are available on only 11 % of
@@ -241,7 +247,7 @@ the window models' test split.
 - **The remaining errors come mostly from ISO 8608 class C (rough) roads** (up to about 0.5° on
   single trips without the camera) and from load changes in the first 2 s of a stop. See
   [`docs/ekf_design.md`](docs/ekf_design.md) §13.
-- **The filter is mildly overconfident.** 87–92 % of errors fall within 2σ, against an ideal of
+- **The filter is mildly overconfident.** 85–90 % of errors fall within 2σ, against an ideal of
   95 %. The controller's `max_estimate_std_deg` gate leaves margin for this.
 
 ## 8. Resilient sensor input

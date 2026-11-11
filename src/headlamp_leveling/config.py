@@ -193,7 +193,7 @@ class FusionConfig:
     fault_nis: float = 9.0                 # mean NIS over the window that flags a sensor fault
     fault_nis_cap: float = 25.0            # per-sample cap so single transients cannot trip it
     fault_window_s: float = 5.0
-    fault_window_aux_updates: int = 20     # camera / NN monitor window, in number of their own updates
+    fault_window_aux_updates: int = 50     # camera / NN monitor window, in number of their own updates
     fault_clear_ratio: float = 0.33        # hysteresis: a fault clears below fault_nis * ratio
     fault_warmup_s: float = 30.0           # no fault evaluation while the filter converges
     fault_holdoff_s: float = 4.0           # ... nor while / just after a load change at standstill
