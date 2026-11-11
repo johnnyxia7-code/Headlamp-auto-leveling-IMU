@@ -196,6 +196,7 @@ class FusionConfig:
     fault_window_aux_updates: int = 20     # camera / NN monitor window, in number of their own updates
     fault_clear_ratio: float = 0.33        # hysteresis: a fault clears below fault_nis * ratio
     fault_warmup_s: float = 30.0           # no fault evaluation while the filter converges
+    fault_holdoff_s: float = 4.0           # ... nor while / just after a load change at standstill
     gate_lockout_s: float = 1.0            # a sensor gated out this long re-opens the states it observes
     max_step_s: float = 0.05               # a longer gap between samples is predicted in sub-steps
     huber_k: float = 3.0                   # Huber weighting of IMU / wheel innovations; 0 = off

@@ -227,7 +227,8 @@ class PitchEKF:
         self._updated: set = set()
         self._imu_gap_s = 0.0
         self._wheel_gap_s = 0.0
-        self._prev_gy = self._prev_gy2 = float("nan")
+        self._monitor_holdoff_s = 0.0
+        self._delay: Deque[tuple] = deque(maxlen=5)
         self._gate_run = {s: 0 for s in CRITICAL_SENSORS}
 
     def _initialize(self, ax: float, az: float) -> None:
@@ -343,6 +344,10 @@ class PitchEKF:
     def _monitor(self, sensor: str, nis: float) -> None:
         """Residual monitor: EMA of the normalised innovation squared, with hysteresis."""
         c = self.cfg
+        if sensor in CRITICAL_SENSORS and self._monitor_holdoff_s > 0.0:
+            # A load change at standstill is a legitimate large tilt step: the innovations
+            # it causes say nothing about sensor health.
+            nis = min(nis, 1.0)
         if sensor in AUX_SENSORS:
             alpha = 1.0 / max(1, c.fault_window_aux_updates)
         else:
@@ -432,7 +437,11 @@ class PitchEKF:
         """
         c = self.cfg
         self._time += dt
-        ax, az = self._remove_lever_arm(ax, az, gy_dps, dt)
+        self._monitor_holdoff_s = max(0.0, self._monitor_holdoff_s - dt)
+        sample = self._remove_lever_arm(dt, ax, az, gy_dps, v_wheel, camera_pitch_deg, ay, gz_dps)
+        if sample is None:
+            return self.output()                 # filling the 5-sample delay line
+        ax, az, gy_dps, v_wheel, camera_pitch_deg, ay, gz_dps = sample
         acc_ok = bool(np.isfinite(ax) and np.isfinite(az))
         wheel_ok = bool(np.isfinite(v_wheel))
         if np.isfinite(ay) and np.isfinite(gz_dps) and wheel_ok:
@@ -474,6 +483,8 @@ class PitchEKF:
         if wheel_ok and self._wheel_gap_s > 0.0:
             self.P[V, V] += (c.drive_away_accel_std * self._wheel_gap_s) ** 2
         self._wheel_gap_s = 0.0 if wheel_ok else self._wheel_gap_s + dt
+        if self._tilt_pending or self._load_event:
+            self._monitor_holdoff_s = c.fault_holdoff_s
         self._updated = set()
         n_sub = max(1, int(np.ceil(dt / c.max_step_s - 1e-9)))     # long gap: predict in sub-steps
         for _ in range(n_sub):
@@ -500,33 +511,44 @@ class PitchEKF:
         self._sanitize()
         return self.output()
 
-    def _remove_lever_arm(self, ax: float, az: float, gy_dps: float, dt: float):
-        """Refer the accelerometer to the pitch axis.
+    def _remove_lever_arm(self, dt: float, ax: float, az: float, gy_dps: float, v_wheel: float,
+                          camera_pitch_deg: float, ay: float, gz_dps: float):
+        """Refer the accelerometer to the pitch axis. Returns the sample to process, or None.
 
         An IMU mounted ahead of the pitch axis sees ``x * pitch acceleration`` in its
         vertical channel (and ``-z *`` it in the longitudinal one). During every
         acceleration change that term is correlated with the acceleration itself, so
-        uncompensated it biases the load pitch (about +0.2 deg for a 0.9 m lever arm
-        on the verification plant). The pitch acceleration is taken from the gyro
-        (model-free); without a gyro sample it falls back to the filter's own
-        squat / dive model.
+        uncompensated it biases the load pitch (+0.2 deg for a 0.9 m lever arm on the
+        verification plant's sedan, -0.5 deg on its soft SUV).
+
+        The pitch acceleration comes from the gyro (model-free, so it also holds for
+        a vehicle the filter was not tuned for). It is the slope of a least-squares
+        line through five gyro samples, centred on the sample being compensated. The
+        whole measurement set is therefore processed two samples (40 ms) late, which
+        is irrelevant for leveling. A plain difference of two or three samples must
+        not be used: it amplifies the gyro noise about 100 times, and because the
+        same noisy sample is also the gyro measurement, the correlated errors biased
+        the load pitch by up to 0.9 deg. The five-point slope has an eighth of that
+        noise.
         """
         c = self.cfg
+        sample = (ax, az, gy_dps, v_wheel, camera_pitch_deg, ay, gz_dps)
         if c.imu_lever_x_m == 0.0 and c.imu_lever_z_m == 0.0:
-            return ax, az
-        if np.isfinite(gy_dps) and np.isfinite(self._prev_gy) and np.isfinite(self._prev_gy2) and dt > 0.0:
-            # Second-order backward difference: the derivative at the current sample, not
-            # half a sample earlier, so it lines up with the accelerometer sample.
-            thdd = -(3.0 * gy_dps - 4.0 * self._prev_gy + self._prev_gy2) * D2R / (2.0 * dt)
-        elif np.isfinite(gy_dps) and np.isfinite(self._prev_gy) and dt > 0.0:
-            thdd = -(gy_dps - self._prev_gy) * D2R / dt          # nose-up positive
-        elif self.initialized:
+            return sample
+        self._delay.append(sample)
+        if len(self._delay) < 5:
+            return None
+        ax, az, gy_c, v_wheel, camera_pitch_deg, ay, gz_dps = self._delay[2]
+        g = [smp[2] for smp in self._delay]
+        if all(np.isfinite(g)) and dt > 0.0:
+            thdd = -(-2.0 * g[0] - g[1] + g[3] + 2.0 * g[4]) * D2R / (10.0 * dt)     # nose-up positive
+        elif self.initialized:          # gyro gap: fall back to the filter's squat / dive model
             x = self.x
             thdd = self.wn ** 2 * (x[KP] * x[A] - x[THD]) - 2.0 * self.zeta * self.wn * x[THDR]
         else:
             thdd = 0.0
-        self._prev_gy2, self._prev_gy = self._prev_gy, gy_dps
-        return ax + c.imu_lever_z_m * thdd, az - c.imu_lever_x_m * thdd
+        return (ax + c.imu_lever_z_m * thdd, az - c.imu_lever_x_m * thdd, gy_c, v_wheel, camera_pitch_deg,
+                ay, gz_dps)
 
     # ------------------------------------------------------------ resilience
     def _reopen(self, idx: int, sd: float) -> None:
