@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=7"]
 export = ["onnx>=1.14"]
+plot = ["matplotlib>=3.5"]
 
 [project.scripts]
 hal = "headlamp_leveling.cli:main"

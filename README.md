@@ -90,15 +90,18 @@ src/headlamp_leveling/
   training/evaluate.py  window metrics, breakdowns, closed-loop aim error
   control/leveling.py   leveling controller
   sim/camera.py         front camera as auxiliary pitch sensor (lane vanishing point)
-  fusion/ekf.py         13-state EKF: IMU + wheel speed + camera (+ NN) -> load pitch with sigma
+  fusion/ekf.py         14-state EKF: IMU + wheel speed + camera (+ NN) -> load pitch with sigma
   fusion/run.py         run the EKF on simulated trips, `hal fuse-eval`
   fusion/input_guard.py resilient sensor-input layer: validity, spikes, stuck, plausibility, health
   fusion/robustness.py  fault scenarios with / without the guard, `hal robust-eval`
   sim/faults.py         sensor fault injection (dropouts, spikes, frozen, offset, saturation, ...)
+  sim/halfcar.py        verification plant: 4-DOF half-car with scripted manoeuvres
+  verify/               scenarios, pass/fail criteria, report and plots, `hal verify`
   export.py             TorchScript / ONNX / metadata export
   cli.py                `hal` command line
 docs/ekf_design.md      EKF specification: states, models, Jacobians, tuning, embedded notes
 docs/input_guard.md     input-layer specification: checks, thresholds, health states, reactions
+docs/verification.md    verification simulator: plant, scenarios, criteria, results, findings
 tests/                  pytest suite
 ```
 
@@ -184,7 +187,7 @@ the beam is too high. The evaluation reports it both over the whole trip and aft
 
 ## 7. Sensor fusion EKF (IMU + wheel speed + camera)
 
-`fusion/ekf.py` estimates the load pitch with a 13-state extended Kalman filter instead of
+`fusion/ekf.py` estimates the load pitch with a 14-state extended Kalman filter instead of
 fixed windows. The full specification, with models, Jacobians, tuning rationale and embedded
 notes, is in [`docs/ekf_design.md`](docs/ekf_design.md).
 
@@ -226,7 +229,7 @@ the window models' test split.
 | EKF: + camera | 0.071° | 0.236° | 91.8 % | 90.2 % | 0.074° | 0.228° | 83 s |
 | EKF: + NN measurement (TCN) | 0.089° | 0.287° | 91.2 % | 86.7 % | 0.095° | 0.309° | 179 s |
 | EKF: + camera + NN | **0.064°** | **0.192°** | **95.5 %** | **91.5 %** | **0.068°** | **0.204°** | **83 s** |
-| *for comparison: TCN window model (§9)* | 0.143° | 0.435° | 77.8 % | – | 0.159° | 0.569° | – |
+| *for comparison: TCN window model (§10)* | 0.143° | 0.435° | 77.8 % | – | 0.159° | 0.569° | – |
 
 - **The EKF beats the window models.** Even without the camera, its closed-loop error is about 30 %
   lower than the TCN's (0.113° vs. 0.159°). The camera roughly halves the TCN's error (0.074°).
@@ -315,7 +318,47 @@ scenario, including the fault-free one. It comes from one trip where a heavy loa
 stop: the lamp needs about 5 s at its slew limit to follow, and the beam is too low during that
 time, not too high.
 
-## 9. Results (simulated test split)
+## 9. Verification simulator
+
+`hal verify` checks the whole chain (input layer → EKF → controller → lamp) for plausible
+behaviour. It runs 17 scripted scenarios on an **independent half-car model**, applies explicit
+pass/fail criteria, and writes a report with a time-series plot per scenario. The full description
+is in [`docs/verification.md`](docs/verification.md).
+
+```bash
+hal verify --list            # the scenarios
+hal verify --seeds 4         # every scenario with four seeds -> runs/verify/report.md + plots
+```
+
+- **Why a second model.** The training simulator and the EKF share the same simplified pitch
+  model, so results on it are optimistic by construction. The verification plant has separate
+  axles, tyres, point-mass loads, load transfer with different anti-squat and anti-dive, and an
+  IMU mounted away from the pitch axis.
+- **Scenarios.** City drive with an unknown load, motorway cruise, an 8 % hill, loading while
+  parked on a 10 % slope, unloading, hard acceleration and braking, a rough road, a winding road,
+  a different vehicle, a miscalibrated IMU position, and six sensor faults.
+- **Criteria.** Convergence time, steady-state aim error, no glare, lamp steadiness, load-step
+  tracking, filter consistency, no false alarms, fault isolation, "beam not raised", and recovery.
+  The limits are engineering targets I chose (for example aim error MAE ≤ 0.15°); replace them
+  with the project's requirements.
+
+**Result with four seeds: 62 of 68 runs pass.** 11 scenarios pass with every seed, and the other
+six each fail with one seed, all by small margins (worst steady-state error 0.26°). The typical
+steady-state aim error is 0.06–0.14°.
+
+The simulator found four problems that the training simulator could not show, all now fixed:
+
+- **IMU lever arm.** An IMU 0.9 m ahead of the pitch axis biased the load pitch by +0.2° to
+  −0.5°. The EKF now removes the effect using the gyro (`fusion.imu_lever_x_m`, `imu_lever_z_m`).
+- **Gyro noise in that compensation.** A simple gyro derivative amplified its noise about 100
+  times and biased the estimate by up to 0.9°. It is now a smoothed five-sample slope.
+- **False fail-safe when loading on a slope.** The tilt step latched the residual monitor.
+- **Different squat and dive.** The EKF now estimates a separate pitch gradient for braking.
+
+`fusion.imu_lever_x_m` and `imu_lever_z_m` default to 0, which matches the training simulator.
+**Set them to the real IMU position for a vehicle.**
+
+## 10. Results (simulated test split)
 
 These are results for the window models (TCN, hybrid) and the physics baseline on the simulated
 test split: 80 unseen trips (13.3 h), each 10 min long, with 7,760 windows. The models were trained
@@ -359,7 +402,7 @@ What these numbers show:
 
 The full per-category tables are in `runs/<arch>/eval_test/report.md`.
 
-## 10. Using real vehicle data
+## 11. Using real vehicle data
 
 The simulator only provides the starting point. Close the sim-to-real gap with logs from an
 instrumented reference vehicle.
@@ -382,7 +425,7 @@ instrumented reference vehicle.
 5. Re-fit the simulator ranges in `configs/*.yaml` (axle rates, pitch gradient, IMU noise) to the
    measured vehicle so the synthetic data stays useful for rare cases.
 
-## 11. Deployment notes
+## 12. Deployment notes
 
 - **MCU budget.** The GRU (~32 k parameters) is the cheapest model to deploy. Its streaming
   form needs no 120 s window buffer. The TCN and hybrid models fit in int8 within ~150 kB of flash.
@@ -402,7 +445,7 @@ instrumented reference vehicle.
 - **NVM.** Store the last fused estimate at ignition-off and restore it at start, so the lamps are
   correct before the first excitation.
 
-## 12. Limitations / next steps
+## 13. Limitations / next steps
 
 - The vehicle model is planar (pitch, heave, simplified roll). There is no tyre or suspension
   kinematic coupling, and no anti-squat or anti-dive geometry beyond the pitch gradient.

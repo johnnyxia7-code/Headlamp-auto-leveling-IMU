@@ -80,7 +80,7 @@ The steps run in this order in every 20 ms cycle (`PitchEKF.step`):
 
 ---
 
-## 3. State vector (13)
+## 3. State vector (14)
 
 | # | State | Meaning | Unit | Initial σ | Process noise (per √s) |
 |---|---|---|---|---|---|
@@ -91,16 +91,20 @@ The steps run in this order in every 20 ms cycle (`PitchEKF.step`):
 | 4 | `θ_s` | **static load pitch** | rad | 1.0° (or NVM) | 0.002° driving; 2°/√s on a load event |
 | 5 | `θ_d` | dynamic pitch (squat/dive) | rad | 0.2° | – |
 | 6 | `θ̇_d` | dynamic pitch rate | rad/s | 0.5°/s | `q_pitch_dyn_rate`·v |
-| 7 | `k_p` | pitch gradient | rad/(m/s²) | 40 % of nominal | 0.1 % of nominal |
+| 7 | `k_p` | pitch gradient under traction (squat) | rad/(m/s²) | 40 % of nominal | 0.1 % of nominal |
 | 8 | `b_ax` | accel x bias | m/s² | 20 mg | 0.02 mg |
 | 9 | `b_az` | accel z bias | m/s² | 20 mg | 0.02 mg |
 | 10 | `b_gy` | gyro y bias | rad/s | 0.5°/s | 0.002°/s |
 | 11 | `s_w` | wheel-speed scale (tyre radius) | – | 2 % | 1e-5 |
 | 12 | `b_cam` | camera pitch extrinsic bias | rad | 0.2° | 1e-4° |
+| 13 | `k_pb` | pitch gradient under braking (dive) | rad/(m/s²) | 40 % of nominal | 0.1 % of nominal |
 
 The squat and dive dynamics use a nominal per-vehicle-programme natural frequency
-and damping (`pitch_freq_hz`, `pitch_damping`). The pitch gradient `k_p` is
-estimated online, because it changes with load and differs between vehicles.
+and damping (`pitch_freq_hz`, `pitch_damping`). The pitch gradients are
+estimated online, because they change with load and differ between vehicles.
+Squat and dive have separate gradients, because suspension geometry gives real
+cars different anti-squat and anti-dive. Both are held constant while the gyro is
+unavailable: without it they cannot be separated from the load pitch.
 
 ## 4. Process model
 
@@ -113,8 +117,8 @@ a'    = a                                       + w_jerk
 γ̇'    = γ̇·(1 − dt/τ_γ)                          + w_curv        (variance ∝ distance travelled)
 θ_s'  = θ_s                                     + w_load
 θ_d'  = θ_d + θ̇_d·dt
-θ̇_d'  = θ̇_d + (ω²(k_p·a − θ_d) − 2ζω·θ̇_d)·dt   + w_road
-k_p, b_ax, b_az, b_gy, s_w, b_cam: random walks
+θ̇_d'  = θ̇_d + (ω²(k·a − θ_d) − 2ζω·θ̇_d)·dt     + w_road        (k = k_p if a ≥ 0, else k_pb)
+k_p, k_pb, b_ax, b_az, b_gy, s_w, b_cam: random walks
 ```
 
 The non-trivial entries of the Jacobian `F = ∂f/∂x` are:
@@ -300,10 +304,18 @@ two can be compared.
 
 ## 11. Embedded implementation notes
 
-- **Cost.** With 13 states, one prediction is two 13×13 matrix products (about
-  4.4 k MAC). The six scalar updates cost about 2·13² MAC each. At 50 Hz the total
-  is about 0.35 MMAC/s, which is well within a Cortex-M4F. RAM is about 1 kB for
+- **Cost.** With 14 states, one prediction is two 14×14 matrix products (about
+  5.5 k MAC). The six scalar updates cost about 2·14² MAC each. At 50 Hz the total
+  is about 0.4 MMAC/s, which is well within a Cortex-M4F. RAM is about 2 kB for
   `P`, `x` and the buffers.
+- **IMU position.** Set `imu_lever_x_m` and `imu_lever_z_m` to the IMU's position
+  relative to the body's pitch axis (close to the centre of gravity). Before the
+  filter uses an accelerometer sample, it removes `x · pitch acceleration` from the
+  vertical channel and `−z ·` it from the longitudinal one. The pitch acceleration
+  is the least-squares slope over five gyro samples, so all measurements are
+  processed 40 ms late. Leaving the lever arm at zero for an IMU 0.9 m ahead of
+  the axis biased the load pitch by 0.2–0.5° on the verification plant; see
+  [`verification.md`](verification.md), findings 1 and 2.
 - **Single precision.** `P` spans about 12 orders of magnitude (wheel scale versus
   grade rate). Options:
   - Scale the states to similar magnitudes: degrees and milli-g as units.
