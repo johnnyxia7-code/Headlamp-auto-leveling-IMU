@@ -292,32 +292,33 @@ gating, Huber weighting and monitor are active in both columns.
 
 | Fault | Aim MAE, unguarded | Aim MAE, guarded | Fail-safe time, unguarded → guarded | Still in fail-safe at trip end, unguarded → guarded | Fault isolated after |
 |---|---|---|---|---|---|
-| no fault | 0.068° | 0.068° | 0 % → 0 % | 0/12 → 0/12 | – |
-| 25 IMU gaps of 30–300 ms | 0.066° | 0.072° | 0 % → 0 % | 0/12 → 0/12 | – |
-| 0.5 % of `ax`, `az`, `gy` samples replaced by glitches | 0.080° | **0.067°** | 0 % → 0 % | 0/12 → 0/12 | – |
-| wheel speed missing 3 × 4 s | 0.161° | **0.071°** | 52 % → 3 % | 10/12 → 0/12 | – |
-| wheel speed reads 0 for 20 s while driving | 0.685° | **0.069°** | 71 % → 5 % | 12/12 → 0/12 | 0.5 s |
-| pitch gyro frozen 30 s | 0.068° | 0.068° | 27 % → 0 % | 4/12 → 0/12 | 0.8 s |
-| pitch gyro +20 °/s until trip end | 0.173° | **0.065°** | 83 % → 0 % | 12/12 → 0/12 | 2.6 s |
-| vertical accelerometer frozen 30 s | 0.445° | **0.073°** | 21 % → 6 % | 3/12 → 0/12 | 0.8 s |
-| vertical accelerometer +2 m/s² for 60 s | 0.262° | **0.084°** | 73 % → 18 % | 11/12 → 1/12 | 3.7 s |
-| longitudinal accelerometer at full scale 20 s | 0.173° | **0.069°** | 83 % → 4 % | 12/12 → 0/12 | 0.5 s |
-| whole IMU missing 15 s | 0.316° | **0.073°** | 68 % → 3 % | 10/12 → 0/12 | 0.5 s |
-| camera +1.2° wrong and noisy for 90 s | 0.080° | 0.080° | 0 % → 0 % | 0/12 → 0/12 | – |
-| camera repeats one frame for 90 s | 0.145° | **0.068°** | 0 % → 0 % | 0/12 → 0/12 | 1.0 s |
+| no fault | 0.069° | 0.069° | 0 % → 0 % | 0/12 → 0/12 | – |
+| 25 IMU gaps of 30–300 ms | 0.065° | 0.076° | 0 % → 0 % | 0/12 → 0/12 | – |
+| 0.5 % of `ax`, `az`, `gy` samples replaced by glitches | 0.085° | **0.068°** | 0 % → 0 % | 0/12 → 0/12 | – |
+| wheel speed missing 3 × 4 s | 0.159° | **0.070°** | 52 % → 3 % | 10/12 → 0/12 | – |
+| wheel speed reads 0 for 20 s while driving | 0.814° | **0.069°** | 66 % → 5 % | 12/12 → 0/12 | 0.5 s |
+| pitch gyro frozen 30 s | 0.075° | 0.070° | 27 % → 0 % | 4/12 → 0/12 | 0.8 s |
+| pitch gyro +20 °/s until trip end | 0.169° | **0.063°** | 83 % → 0 % | 12/12 → 0/12 | 2.6 s |
+| vertical accelerometer frozen 30 s | 0.444° | **0.072°** | 21 % → 6 % | 3/12 → 0/12 | 0.8 s |
+| vertical accelerometer +2 m/s² for 60 s | 0.266° | **0.087°** | 73 % → 18 % | 11/12 → 1/12 | 3.7 s |
+| longitudinal accelerometer at full scale 20 s | 0.169° | **0.069°** | 83 % → 4 % | 12/12 → 0/12 | 0.5 s |
+| whole IMU missing 15 s | 0.317° | **0.070°** | 68 % → 3 % | 10/12 → 0/12 | 0.5 s |
+| camera +1.2° wrong and noisy for 90 s | 0.094° | 0.094° | 0 % → 0 % | 0/12 → 0/12 | – |
+| camera repeats one frame for 90 s | 0.172° | **0.070°** | 0 % → 0 % | 0/12 → 0/12 | 1.0 s |
 
 - **No cost on healthy data.** Without faults the two variants give the same aim error, and the
   guard raises no false alarm on any of the 12 trips.
-- **Most faults no longer matter.** With the guard, the aim error stays within 0.02° of the
+- **Most faults no longer matter.** With the guard, the aim error stays within 0.03° of the
   fault-free value in every scenario. Without it, six of the twelve fault types end with the
   lamp latched in fail-safe on at least 10 of the 12 trips.
 - **Fail-safe only when needed.** The guarded fail-safe time is close to the time a critical
   sensor was really unusable, and leveling resumes afterwards. The one
   exception is a vertical-accelerometer offset on 1 of 12 trips, where the EKF's monitor latched
   before the guard had isolated the sensor.
-- **Short IMU gaps:** holding the last value is as good as skipping the update (0.066° vs. 0.072°).
+- **Short IMU gaps:** holding the last value is slightly better than skipping the update (0.065° vs.
+  0.076°).
 - **A plausible-but-wrong camera** is the hardest case. No model-free check can catch it; the
-  EKF's residual monitor limits the damage (0.110° during the fault) in both variants.
+  EKF's residual monitor limits the damage (0.150° during the fault) in both variants.
 
 The "worst" column of the full report (`runs/robustness/robustness_report.md`) is 2.7° in every
 scenario, including the fault-free one. It comes from one trip where a heavy load is removed at a
