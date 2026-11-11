@@ -227,6 +227,7 @@ class PitchEKF:
         self._updated: set = set()
         self._imu_gap_s = 0.0
         self._wheel_gap_s = 0.0
+        self._prev_gy = self._prev_gy2 = float("nan")
         self._gate_run = {s: 0 for s in CRITICAL_SENSORS}
 
     def _initialize(self, ax: float, az: float) -> None:
@@ -431,6 +432,7 @@ class PitchEKF:
         """
         c = self.cfg
         self._time += dt
+        ax, az = self._remove_lever_arm(ax, az, gy_dps, dt)
         acc_ok = bool(np.isfinite(ax) and np.isfinite(az))
         wheel_ok = bool(np.isfinite(v_wheel))
         if np.isfinite(ay) and np.isfinite(gz_dps) and wheel_ok:
@@ -497,6 +499,34 @@ class PitchEKF:
         self._break_gate_lockout()
         self._sanitize()
         return self.output()
+
+    def _remove_lever_arm(self, ax: float, az: float, gy_dps: float, dt: float):
+        """Refer the accelerometer to the pitch axis.
+
+        An IMU mounted ahead of the pitch axis sees ``x * pitch acceleration`` in its
+        vertical channel (and ``-z *`` it in the longitudinal one). During every
+        acceleration change that term is correlated with the acceleration itself, so
+        uncompensated it biases the load pitch (about +0.2 deg for a 0.9 m lever arm
+        on the verification plant). The pitch acceleration is taken from the gyro
+        (model-free); without a gyro sample it falls back to the filter's own
+        squat / dive model.
+        """
+        c = self.cfg
+        if c.imu_lever_x_m == 0.0 and c.imu_lever_z_m == 0.0:
+            return ax, az
+        if np.isfinite(gy_dps) and np.isfinite(self._prev_gy) and np.isfinite(self._prev_gy2) and dt > 0.0:
+            # Second-order backward difference: the derivative at the current sample, not
+            # half a sample earlier, so it lines up with the accelerometer sample.
+            thdd = -(3.0 * gy_dps - 4.0 * self._prev_gy + self._prev_gy2) * D2R / (2.0 * dt)
+        elif np.isfinite(gy_dps) and np.isfinite(self._prev_gy) and dt > 0.0:
+            thdd = -(gy_dps - self._prev_gy) * D2R / dt          # nose-up positive
+        elif self.initialized:
+            x = self.x
+            thdd = self.wn ** 2 * (x[KP] * x[A] - x[THD]) - 2.0 * self.zeta * self.wn * x[THDR]
+        else:
+            thdd = 0.0
+        self._prev_gy2, self._prev_gy = self._prev_gy, gy_dps
+        return ax + c.imu_lever_z_m * thdd, az - c.imu_lever_x_m * thdd
 
     # ------------------------------------------------------------ resilience
     def _reopen(self, idx: int, sd: float) -> None:

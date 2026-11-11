@@ -175,6 +175,9 @@ def run_ekf(raw: Dict[str, np.ndarray], cfg: Config, use_camera: Optional[bool] 
     out["guard"] = g
     out["numeric_resets"] = ekf.numeric_resets
     out["true_load_pitch_deg"] = raw["load_pitch_deg"][idx].astype(np.float64)
+    # What the lamp should compensate. Plants that model slope-induced pitch provide it;
+    # otherwise it is the static load pitch.
+    out["true_aim_pitch_deg"] = np.asarray(raw.get("aim_pitch_deg", raw["load_pitch_deg"]))[idx].astype(np.float64)
     out["true_road_grade_deg"] = raw["road_grade_deg"][idx].astype(np.float64)
     out["camera_frames"] = np.isfinite(cam)
     out["final_state"] = ekf.x.copy()
@@ -189,16 +192,20 @@ def closed_loop_series(res: Dict[str, np.ndarray], cfg: Config) -> Dict[str, np.
     fs = res["fs_hz"]
     period = max(1, int(round(cfg.control.update_period_s * fs)))
     ctrl = LevelingController(cfg.control)
-    t, err, fs_flag = [], [], []
+    t, err, fs_flag, corr, steps = [], [], [], [], []
     req = res.get("failsafe_request")
     for k in range(period - 1, len(res["load_pitch_deg"]), period):
         out = ctrl.update(period / fs, res["load_pitch_deg"][k], estimate_std_deg=res["load_pitch_std_deg"][k],
                           fault=bool(res["fault"][k - period + 1:k + 1].any()),
                           failsafe_request=bool(req[k - period + 1:k + 1].any()) if req is not None else False)
         t.append(k / fs)
-        err.append(res["true_load_pitch_deg"][k] - out.correction_deg)
+        err.append(res["true_aim_pitch_deg"][k] - out.correction_deg)
         fs_flag.append(out.fault)
-    return {"t": np.asarray(t), "err": np.asarray(err), "failsafe": np.asarray(fs_flag, bool)}
+        corr.append(out.correction_deg)
+        steps.append(out.steps)
+    return {"t": np.asarray(t), "err": np.asarray(err), "failsafe": np.asarray(fs_flag, bool),
+            "correction": np.asarray(corr), "steps": np.asarray(steps),
+            "truth": res["true_aim_pitch_deg"][period - 1::period][:len(t)]}
 
 
 def closed_loop_from_series(res: Dict[str, np.ndarray], cfg: Config, warmup_s: float) -> np.ndarray:

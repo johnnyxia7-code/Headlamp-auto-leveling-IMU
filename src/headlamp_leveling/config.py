@@ -149,6 +149,10 @@ class FusionConfig:
     pitch_gradient_rel_std: float = 0.4    # prior uncertainty of the pitch gradient
     camera_lookahead_m: float = 30.0
     camera_min_speed_ms: float = 8.0       # below this the look-ahead term dominates: frames not used
+    # IMU mounting position relative to the body's pitch axis (close to the CG). Pitch
+    # acceleration times this lever arm appears in the accelerometer and is removed.
+    imu_lever_x_m: float = 0.0             # forward of the pitch axis
+    imu_lever_z_m: float = 0.0             # above the pitch axis
     # Initial uncertainty (1 sigma).
     init_load_pitch_deg: float = 0.0
     init_load_pitch_std_deg: float = 1.0

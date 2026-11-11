@@ -59,6 +59,18 @@ def _cmd_robust_eval(a) -> None:
     evaluate_robustness(cfg, a.trips, a.out, a.scenarios or None)
 
 
+def _cmd_verify(a) -> None:
+    from .verify import SCENARIOS, verify
+    if a.list:
+        for name, make in SCENARIOS.items():
+            sc = make()
+            print(f"{name:26s} [{sc.group}] {sc.title}")
+        return
+    report = verify(load_config(a.config), a.scenario or None, a.out, plots=not a.no_plots, seed=a.seed)
+    if a.strict and report["passed"] < report["total"]:
+        sys.exit(1)
+
+
 def _cmd_simulate(a) -> None:
     import numpy as np
     from .sim.scenario import simulate_trip
@@ -123,6 +135,16 @@ def main(argv: Optional[List[str]] = None) -> None:
     r.add_argument("-o", "--out", default="runs/robustness")
     r.add_argument("--scenarios", nargs="*", default=None, help="subset of fault scenarios (default: all)")
     r.set_defaults(func=_cmd_robust_eval)
+
+    v = sub.add_parser("verify", help="scripted scenarios on the half-car plant with pass / fail criteria")
+    v.add_argument("-c", "--config", default=None)
+    v.add_argument("-o", "--out", default="runs/verify")
+    v.add_argument("--scenario", nargs="*", default=None, help="scenario names (default: all)")
+    v.add_argument("--list", action="store_true", help="list the scenarios and exit")
+    v.add_argument("--no-plots", action="store_true", help="skip the PNG time-series plots (no matplotlib needed)")
+    v.add_argument("--seed", type=int, default=0, help="sensor-noise and road-profile seed")
+    v.add_argument("--strict", action="store_true", help="exit with status 1 if any scenario fails")
+    v.set_defaults(func=_cmd_verify)
 
     s = sub.add_parser("simulate", help="simulate one trip and print its scenario")
     s.add_argument("-c", "--config", default=None)

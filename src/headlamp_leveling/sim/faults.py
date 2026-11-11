@@ -148,6 +148,60 @@ def camera_frozen(raw, rng) -> List[FaultWindow]:
     return [FaultWindow("camera", "frozen", 200.0, 290.0)]
 
 
+def apply(raw: Dict[str, np.ndarray], channel: str, kind: str, t0: float, t1: float,
+          value: float = 0.0, seed: int = 0) -> FaultWindow:
+    """Apply one fault in place to ``raw`` (use on a copy; see :func:`copy_raw`).
+
+    channel  one of the sensor channels, "imu" (all six IMU axes) or "camera"
+    kind     "missing"  no data (NaN)
+             "frozen"   repeats the value it had at t0
+             "offset"   adds ``value``
+             "value"    reads ``value`` constantly
+             "glitch"   a fraction ``value`` of the samples gets a large random error
+             "wrong"    camera only: plausible-looking pitch with a ``value`` deg bias and extra noise
+    """
+    fs, n = raw["fs_hz"], raw["inputs"].shape[0]
+    s = _span(fs, t0, t1, n)
+    rng = np.random.default_rng(seed)
+    if channel == "camera":
+        cam = raw["camera_pitch_deg"]
+        frames = np.arange(s.start, s.stop, max(1, int(fs / 10.0)))
+        if kind == "missing":
+            cam[s] = np.nan
+        elif kind == "frozen":
+            cam[frames] = value
+        elif kind == "wrong":
+            cam[frames] = raw["body_pitch_deg"][frames] + value + rng.normal(0.0, 0.4, size=frames.size)
+        else:
+            raise ValueError(f"fault kind {kind!r} is not defined for the camera")
+        return FaultWindow(channel, kind, t0, t1)
+    cols = list(range(6)) if channel == "imu" else [_I[channel]]
+    x = raw["inputs"]
+    for c in cols:
+        if kind == "missing":
+            x[s, c] = np.nan
+        elif kind == "frozen":
+            x[s, c] = x[s.start, c]
+        elif kind == "offset":
+            x[s, c] += value
+        elif kind == "value":
+            x[s, c] = value
+        elif kind == "glitch":
+            k = s.start + rng.choice(s.stop - s.start, size=int(value * (s.stop - s.start)), replace=False)
+            amp = 150.0 if CHANNELS[c].startswith("g") else 15.0
+            x[k, c] += rng.choice([-1.0, 1.0], size=k.size) * rng.uniform(0.5, 1.0, size=k.size) * amp
+        else:
+            raise ValueError(f"unknown fault kind {kind!r}")
+    return FaultWindow(channel, kind, t0, t1)
+
+
+def copy_raw(raw: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+    out = dict(raw)
+    out["inputs"] = raw["inputs"].astype(np.float64).copy()
+    out["camera_pitch_deg"] = raw["camera_pitch_deg"].astype(np.float64).copy()
+    return out
+
+
 SCENARIOS: Dict[str, Callable] = {
     "none": none,
     "imu_dropouts": imu_dropouts,
