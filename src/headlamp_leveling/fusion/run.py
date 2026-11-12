@@ -1,0 +1,354 @@
+"""Run the fusion EKF over simulated trips and evaluate it against ground truth."""
+
+from __future__ import annotations
+
+import copy
+import json
+from pathlib import Path
+from typing import Callable, Dict, List, Optional
+
+import numpy as np
+
+from .. import CHANNELS
+from ..config import Config
+from ..control.leveling import LevelingController
+from ..sim.scenario import simulate_trip
+from ..training.metrics import DEG_PER_PERCENT
+from .ekf import PitchEKF
+
+AX, AY, AZ, GY, GZ, VW = (CHANNELS.index(c) for c in ("ax", "ay", "az", "gy", "gz", "v_wheel"))
+
+# (time index at fusion rate) -> (load pitch estimate deg, 1-sigma deg)
+LoadPitchMeasurements = Dict[int, tuple]
+
+
+def _block_mean(x: np.ndarray, q: int) -> np.ndarray:
+    n = (x.shape[0] // q) * q
+    return x[:n].reshape(n // q, q, *x.shape[1:]).mean(axis=1)
+
+
+def _block_last_finite(x: np.ndarray, q: int) -> np.ndarray:
+    n = (x.shape[0] // q) * q
+    blocks = x[:n].reshape(n // q, q)
+    out = np.full(blocks.shape[0], np.nan)
+    for j in range(q):  # later samples in the block overwrite earlier ones
+        col = blocks[:, j]
+        ok = np.isfinite(col)
+        out[ok] = col[ok]
+    return out
+
+
+def _block_nanmean(x: np.ndarray, q: int) -> np.ndarray:
+    """Block mean ignoring NaN; a block without any valid sample stays NaN."""
+    n = (x.shape[0] // q) * q
+    b = x[:n].reshape(n // q, q, *x.shape[1:])
+    ok = np.isfinite(b)
+    cnt = ok.sum(axis=1)
+    return np.where(cnt > 0, np.where(ok, b, 0.0).sum(axis=1) / np.maximum(cnt, 1), np.nan)
+
+
+def _hold_missing(x: np.ndarray) -> np.ndarray:
+    """Naive handling of missing samples (no guard): repeat the last received value."""
+    x = x.copy()
+    for j in range(x.shape[1]):
+        col = x[:, j]
+        ok = np.isfinite(col)
+        if ok.all():
+            continue
+        idx = np.where(ok, np.arange(col.size), 0)
+        np.maximum.accumulate(idx, out=idx)
+        x[:, j] = np.where(ok.any(), col[idx], 0.0)
+        x[~np.isfinite(x[:, j]), j] = 0.0
+    return x
+
+
+def guard_signals(raw: Dict[str, np.ndarray], cfg: Config) -> Dict[str, np.ndarray]:
+    """Run the input guard over a trip at the raw sample rate.
+
+    Returns the cleaned signals (NaN = rejected) plus per-sample flags.
+    """
+    from .input_guard import CHANNELS as GCH, CRITICAL, Health, SensorInputGuard
+    inp = raw["inputs"].astype(np.float64)
+    cam = raw["camera_pitch_deg"].astype(np.float64)
+    n = inp.shape[0]
+    dt = 1.0 / raw["fs_hz"]
+    src = [CHANNELS.index(c) for c in GCH[:-1]]
+    samples = np.concatenate([inp[:, src], cam[:, None]], axis=1).tolist()
+    guard = SensorInputGuard(cfg.guard)
+    clean = np.empty((n, len(GCH)))
+    failsafe = np.zeros(n, bool)
+    degraded = np.zeros(n, bool)
+    critical_failed = np.zeros(n, bool)
+    recovered: List[tuple] = []
+    isolated: List[tuple] = []
+    any_failed = np.zeros(n, bool)
+    for k in range(n):
+        o = guard.process(samples[k], dt)
+        clean[k] = o.values
+        failsafe[k], degraded[k], critical_failed[k] = o.failsafe, o.degraded, o.critical_failed
+        any_failed[k] = any(h == Health.FAILED for h in o.health.values())
+        if o.recovered:
+            recovered.append((k, o.recovered, o.outage_s))
+        if o.newly_failed:
+            isolated.append((k, o.newly_failed))
+    back = np.full_like(inp, np.nan)
+    back[:, src] = clean[:, :-1]
+    if "gx" not in GCH:                       # pragma: no cover - defensive
+        back[:, CHANNELS.index("gx")] = inp[:, CHANNELS.index("gx")]
+    return {"inputs": back, "camera_pitch_deg": clean[:, -1], "failsafe": failsafe, "degraded": degraded,
+            "critical_failed": critical_failed, "any_failed": any_failed, "recovered": recovered,
+            "isolated": isolated, "summary": guard.summary(),
+            "final_health": {c: int(guard.ch[c].health) for c in GCH}}
+
+
+def run_ekf(raw: Dict[str, np.ndarray], cfg: Config, use_camera: Optional[bool] = None,
+            load_pitch_meas: Optional[LoadPitchMeasurements] = None,
+            guard: Optional[bool] = None) -> Dict[str, np.ndarray]:
+    """Filter one trip given its full-rate signals (``simulate_trip(..., raw=True)["raw"]``).
+
+    With ``guard`` (default: ``cfg.guard.enabled``) the raw samples first pass the
+    resilient input layer; rejected samples reach the EKF as NaN and are skipped.
+    Without it, missing samples are replaced by the last received value.
+
+    Returns time series at the fusion rate: estimates, 1-sigma, truth and flags.
+    """
+    fcfg = copy.deepcopy(cfg.fusion)
+    if use_camera is not None:
+        fcfg.use_camera = use_camera
+    use_guard = cfg.guard.enabled if guard is None else guard
+    q = max(1, int(round(raw["fs_hz"] / fcfg.fs_hz)))
+    fs = raw["fs_hz"] / q
+    fcfg.fs_hz = fs
+    dt = 1.0 / fs
+    n = raw["inputs"].shape[0] // q
+    if use_guard:
+        g = guard_signals(raw, cfg)
+        x = _block_nanmean(g["inputs"], q)
+        cam = _block_last_finite(g["camera_pitch_deg"], q)
+        failsafe_req = g["failsafe"][:n * q].reshape(n, q).any(axis=1)
+        degraded = g["degraded"][:n * q].reshape(n, q).any(axis=1)
+        recover_at: Dict[int, tuple] = {}
+        for k_raw, channels, outage in g["recovered"]:
+            kb = min(n - 1, k_raw // q)
+            prev = recover_at.get(kb, ((), 0.0))
+            recover_at[kb] = (tuple(set(prev[0]) | set(channels)), max(prev[1], outage))
+        isolate_at: Dict[int, set] = {}
+        for k_raw, channels in g["isolated"]:
+            isolate_at.setdefault(min(n - 1, k_raw // q), set()).update(channels)
+    else:
+        g = None
+        x = _block_mean(_hold_missing(raw["inputs"].astype(np.float64)), q)
+        cam = _block_last_finite(raw["camera_pitch_deg"].astype(np.float64), q)
+        failsafe_req = np.zeros(n, bool)
+        degraded = np.zeros(n, bool)
+        recover_at = {}
+        isolate_at = {}
+    idx = np.arange(q - 1, n * q, q)                     # truth sampled at block ends
+
+    ekf = PitchEKF(fcfg)
+    keys = ("load_pitch_deg", "load_pitch_std_deg", "road_grade_deg", "road_grade_std_deg", "body_pitch_deg")
+    out = {k: np.empty(n) for k in keys}
+    out["standstill"] = np.zeros(n, bool)
+    out["fault"] = np.zeros(n, bool)
+    # With the guard, a model-inconsistency (NIS) fault must persist before it latches the
+    # fail-safe: the guard needs up to plaus_qualify_s to isolate a bad channel first.
+    persist = int(round(cfg.guard.failsafe_after_s * fs)) if use_guard else 1
+    fault_run = 0
+    for k in range(n):
+        if k in isolate_at:
+            ekf.notify_isolated(isolate_at[k])
+        if k in recover_at:
+            ekf.notify_recovered(*recover_at[k])
+        o = ekf.step(dt, x[k, AX], x[k, AZ], x[k, GY], x[k, VW], cam[k], x[k, AY], x[k, GZ])
+        if load_pitch_meas and k in load_pitch_meas:
+            z, sd = load_pitch_meas[k]
+            ekf.update_load_pitch(z, sd)
+            o = ekf.output()
+        for key in keys:
+            out[key][k] = getattr(o, key)
+        out["standstill"][k] = o.standstill
+        fault_run = fault_run + 1 if o.critical_fault else 0
+        out["fault"][k] = fault_run >= persist
+    out["fs_hz"] = fs
+    out["failsafe_request"] = failsafe_req
+    out["degraded"] = degraded
+    out["guard"] = g
+    out["numeric_resets"] = ekf.numeric_resets
+    out["true_load_pitch_deg"] = raw["load_pitch_deg"][idx].astype(np.float64)
+    # What the lamp should compensate. Plants that model slope-induced pitch provide it;
+    # otherwise it is the static load pitch.
+    out["true_aim_pitch_deg"] = np.asarray(raw.get("aim_pitch_deg", raw["load_pitch_deg"]))[idx].astype(np.float64)
+    out["true_road_grade_deg"] = raw["road_grade_deg"][idx].astype(np.float64)
+    out["camera_frames"] = np.isfinite(cam)
+    out["final_state"] = ekf.x.copy()
+    return out
+
+
+def closed_loop_series(res: Dict[str, np.ndarray], cfg: Config) -> Dict[str, np.ndarray]:
+    """Feed the EKF output to the leveling controller.
+
+    Returns, at the controller rate: time (s), signed aim error (deg) and the fail-safe flag.
+    """
+    fs = res["fs_hz"]
+    period = max(1, int(round(cfg.control.update_period_s * fs)))
+    ctrl = LevelingController(cfg.control)
+    t, err, fs_flag, corr, steps = [], [], [], [], []
+    req = res.get("failsafe_request")
+    for k in range(period - 1, len(res["load_pitch_deg"]), period):
+        out = ctrl.update(period / fs, res["load_pitch_deg"][k], estimate_std_deg=res["load_pitch_std_deg"][k],
+                          fault=bool(res["fault"][k - period + 1:k + 1].any()),
+                          failsafe_request=bool(req[k - period + 1:k + 1].any()) if req is not None else False)
+        t.append(k / fs)
+        err.append(res["true_aim_pitch_deg"][k] - out.correction_deg)
+        fs_flag.append(out.fault)
+        corr.append(out.correction_deg)
+        steps.append(out.steps)
+    return {"t": np.asarray(t), "err": np.asarray(err), "failsafe": np.asarray(fs_flag, bool),
+            "correction": np.asarray(corr), "steps": np.asarray(steps),
+            "truth": res["true_aim_pitch_deg"][period - 1::period][:len(t)]}
+
+
+def closed_loop_from_series(res: Dict[str, np.ndarray], cfg: Config, warmup_s: float) -> np.ndarray:
+    """|aim error| after warm-up (deg) with the leveling controller in the loop."""
+    cl = closed_loop_series(res, cfg)
+    return np.abs(cl["err"][cl["t"] >= warmup_s])
+
+
+def _stats(err: np.ndarray) -> Dict[str, float]:
+    a = np.abs(err)
+    return {"mae_deg": float(a.mean()), "p95_deg": float(np.percentile(a, 95)),
+            "within_0.1deg": float(np.mean(a <= 0.1)), "within_0.2deg": float(np.mean(a <= 0.2)),
+            "within_0.25percent": float(np.mean(a <= 0.25 * DEG_PER_PERCENT)),
+            "within_0.5percent": float(np.mean(a <= 0.5 * DEG_PER_PERCENT))}
+
+
+def nn_load_pitch_measurements(trip: Dict, ckpt: Dict, fusion_fs: float, period_s: float,
+                               std_deg: float) -> LoadPitchMeasurements:
+    """Run a trained window model on the decimated inputs and map its outputs to fusion steps."""
+    from ..data.features import build_features
+    from ..training.evaluate import model_estimator
+    fs = ckpt["fs_hz"]
+    W = ckpt["window"]
+    feats = build_features(trip["inputs"], fs)
+    step = max(1, int(round(period_s * fs)))
+    ends = np.arange(W - 1, len(feats), step)
+    if ends.size == 0:
+        return {}
+    preds = model_estimator(ckpt)(np.stack([feats[e - W + 1:e + 1] for e in ends]))
+    return {int(round((e + 1) / fs * fusion_fs)) - 1: (float(p), std_deg) for e, p in zip(ends, preds)}
+
+
+_FUSION_VARIANTS = ("ekf_imu_wheel", "ekf_imu_wheel_camera")
+_FUSION_VARIANTS_NN = ("ekf_imu_wheel_nn", "ekf_imu_wheel_camera_nn")
+
+
+def _fusion_trip(args) -> Dict:
+    """All fusion variants on one test trip (runs in a worker process)."""
+    cfg, i, seed, checkpoint, nn_std_deg, warmup = args
+    trip = simulate_trip(cfg, seed, raw=True)
+    raw = trip["raw"]
+    names = list(_FUSION_VARIANTS)
+    meas = None
+    if checkpoint:
+        from ..training.train import load_checkpoint
+        ckpt = load_checkpoint(checkpoint)
+        meas = nn_load_pitch_measurements(trip, ckpt, cfg.fusion.fs_hz, warmup / 2.0, nn_std_deg)
+        names += list(_FUSION_VARIANTS_NN)
+    out: Dict = {"i": i, "label": f"{trip['meta']['load_case']}, {trip['meta']['grade_class']}", "variants": {}}
+    for name in names:
+        res = run_ekf(raw, cfg, use_camera="camera" in name, load_pitch_meas=meas if name.endswith("_nn") else None)
+        fs = res["fs_hz"]
+        err = res["load_pitch_deg"] - res["true_load_pitch_deg"]
+        after = np.arange(err.size) / fs >= warmup
+        v = {"est_err": err[after],
+             "grade_err": (res["road_grade_deg"] - res["true_road_grade_deg"])[after],
+             "z": err[after] / np.maximum(res["load_pitch_std_deg"][after], 1e-6),
+             "cl_err": closed_loop_from_series(res, cfg, warmup), "conv": None,
+             "cam_frames": float(res["camera_frames"].mean())}
+        # Convergence from a wrong initial value: only trips whose load differs from the
+        # filter's initial value by >= 0.3 deg; first time the error stays within 0.2 deg for 30 s.
+        if abs(res["true_load_pitch_deg"][0] - cfg.fusion.init_load_pitch_deg) >= 0.3:
+            ok = np.abs(err) <= 0.2
+            hold = int(30 * fs)
+            run = np.convolve(ok.astype(float), np.ones(hold), mode="valid") >= hold
+            v["conv"] = float(np.argmax(run) / fs) if run.any() else float("inf")
+        out["variants"][name] = v
+    return out
+
+
+def evaluate_fusion(cfg: Config, n_trips: int = 20, out_dir: Optional[str] = None,
+                    checkpoint: Optional[str] = None, nn_std_deg: float = 0.35,
+                    verbose: bool = True, workers: int = 0) -> Dict:
+    """Compare fusion variants on the first ``n_trips`` trips of the test split (same seeds)."""
+    import multiprocessing as mp
+    import os
+    root = np.random.SeedSequence(cfg.dataset.seed)
+    test_seeds = root.spawn(3)[2].spawn(max(n_trips, cfg.dataset.n_test_trips))[:n_trips]
+    warmup = cfg.dataset.window_s
+    jobs = [(cfg, i, s, checkpoint, nn_std_deg, warmup) for i, s in enumerate(test_seeds)]
+    workers = workers or min(os.cpu_count() or 1, n_trips)
+    results: List[Dict] = []
+
+    def done(r: Dict) -> None:
+        results.append(r)
+        if verbose:
+            print(f"[fusion] trip {len(results)}/{n_trips} ({r['label']})", flush=True)
+
+    if workers > 1:
+        with mp.get_context("spawn").Pool(workers) as pool:
+            for r in pool.imap_unordered(_fusion_trip, jobs):
+                done(r)
+    else:
+        for job in jobs:
+            done(_fusion_trip(job))
+    results.sort(key=lambda r: r["i"])
+
+    variants = list(results[0]["variants"])
+    est_err = {k: [r["variants"][k]["est_err"] for r in results] for k in variants}
+    grade_err = {k: [r["variants"][k]["grade_err"] for r in results] for k in variants}
+    cl_err = {k: [r["variants"][k]["cl_err"] for r in results] for k in variants}
+    z_scores = {k: [r["variants"][k]["z"] for r in results] for k in variants}
+    conv_time = {k: [r["variants"][k]["conv"] for r in results if r["variants"][k]["conv"] is not None]
+                 for k in variants}
+    cam_frames = sum(r["variants"]["ekf_imu_wheel_camera"]["cam_frames"] for r in results)
+
+    report: Dict = {"trips": n_trips, "warmup_s": warmup,
+                    "camera_frame_fraction": cam_frames / max(n_trips, 1), "variants": {}}
+    for name in variants:
+        e = np.concatenate(est_err[name])
+        z = np.concatenate(z_scores[name])
+        report["variants"][name] = {
+            "load_pitch": _stats(e),
+            "load_pitch_bias_deg": float(e.mean()),
+            "consistency_within_2sigma": float(np.mean(np.abs(z) <= 2.0)),
+            "road_grade_mae_deg": float(np.mean(np.abs(np.concatenate(grade_err[name])))),
+            "convergence_trips": len(conv_time[name]),
+            "convergence_s_median": float(np.median(conv_time[name])) if conv_time[name] else float("nan"),
+            "convergence_s_p90": float(np.percentile(conv_time[name], 90, method="higher")) if conv_time[name] else float("nan"),
+            "closed_loop": _stats(np.concatenate(cl_err[name])),
+        }
+
+    out = Path(out_dir or "runs/fusion")
+    out.mkdir(parents=True, exist_ok=True)
+    with open(out / "fusion_report.json", "w", encoding="utf-8") as fh:
+        json.dump(report, fh, indent=2)
+    (out / "fusion_report.md").write_text(render_fusion_markdown(report), encoding="utf-8")
+    if verbose:
+        print(render_fusion_markdown(report))
+    return report
+
+
+def render_fusion_markdown(r: Dict) -> str:
+    lines = [f"# Sensor-fusion EKF evaluation ({r['trips']} test trips, after {r['warmup_s']:.0f} s)", "",
+             f"Camera frames available {100 * r['camera_frame_fraction']:.1f} % of filter steps.", "",
+             "| variant | load pitch MAE | P95 | within 0.2 deg | bias | within 2 sigma | grade MAE "
+             "| convergence median / P90 | closed-loop MAE | closed-loop P95 | within 0.25 % |",
+             "|---|---|---|---|---|---|---|---|---|---|---|"]
+    for name, v in r["variants"].items():
+        lp, cl = v["load_pitch"], v["closed_loop"]
+        lines.append(f"| {name} | {lp['mae_deg']:.3f} | {lp['p95_deg']:.3f} | {100 * lp['within_0.2deg']:.1f} % "
+                     f"| {v['load_pitch_bias_deg']:+.3f} | {100 * v['consistency_within_2sigma']:.1f} % "
+                     f"| {v['road_grade_mae_deg']:.3f} | {v['convergence_s_median']:.0f} / {v['convergence_s_p90']:.0f} s "
+                     f"(n={v['convergence_trips']}) "
+                     f"| {cl['mae_deg']:.3f} | {cl['p95_deg']:.3f} | {100 * cl['within_0.25percent']:.1f} % |")
+    return "\n".join(lines) + "\n"
