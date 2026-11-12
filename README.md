@@ -96,12 +96,14 @@ src/headlamp_leveling/
   fusion/robustness.py  fault scenarios with / without the guard, `hal robust-eval`
   sim/faults.py         sensor fault injection (dropouts, spikes, frozen, offset, saturation, ...)
   sim/halfcar.py        verification plant: 4-DOF half-car with scripted manoeuvres
-  verify/               scenarios, pass/fail criteria, report and plots, `hal verify`
+  verify/               scenarios, pass/fail criteria, report and plots, `hal verify`;
+                        IMU location study, `hal mount-study`
   export.py             TorchScript / ONNX / metadata export
   cli.py                `hal` command line
 docs/ekf_design.md      EKF specification: states, models, Jacobians, tuning, embedded notes
 docs/input_guard.md     input-layer specification: checks, thresholds, health states, reactions
 docs/verification.md    verification simulator: plant, scenarios, criteria, results, findings
+docs/imu_mounting.md    IMU mounting-location study: six locations, sensitivities, recommendation
 tests/                  pytest suite
 ```
 
@@ -328,7 +330,7 @@ time, not too high.
 ## 9. Verification simulator
 
 `hal verify` checks the whole chain (input layer → EKF → controller → lamp) for plausible
-behaviour. It runs 17 scripted scenarios on an **independent half-car model**, applies explicit
+behaviour. It runs 18 scripted scenarios on an **independent half-car model**, applies explicit
 pass/fail criteria, and writes a report with a time-series plot per scenario. The full description
 is in [`docs/verification.md`](docs/verification.md).
 
@@ -349,7 +351,7 @@ hal verify --seeds 4         # every scenario with four seeds -> runs/verify/rep
   The limits are engineering targets I chose (for example aim error MAE ≤ 0.15°); replace them
   with the project's requirements.
 
-**Result with four seeds: 62 of 68 runs pass.** 11 scenarios pass with every seed, and the other
+**Result with four seeds: 66 of 72 runs pass.** 12 scenarios pass with every seed, and the other
 six each fail with one seed, all by small margins (worst steady-state error 0.26°). The typical
 steady-state aim error is 0.06–0.14°.
 
@@ -362,8 +364,26 @@ The simulator found four problems that the training simulator could not show, al
 - **False fail-safe when loading on a slope.** The tilt step latched the residual monitor.
 - **Different squat and dive.** The EKF now estimates a separate pitch gradient for braking.
 
-`fusion.imu_lever_x_m` and `imu_lever_z_m` default to 0, which matches the training simulator.
-**Set them to the real IMU position for a vehicle.**
+`fusion.imu_lever_x_m`, `imu_lever_z_m` and `imu_rear_axle_x_m` default to 0, which matches the
+training simulator. **Set them to the real IMU position for a vehicle.**
+
+### Where to mount the IMU
+
+`hal mount-study` repeats eight of the scenarios with the IMU at six places in the car
+([`docs/imu_mounting.md`](docs/imu_mounting.md)). Steady-state aim error, mean / worst of 32 runs:
+
+| Location | Position known | Position not configured |
+|---|---|---|
+| Overhead console | 0.088° / 0.254° | 0.102° / 0.292° |
+| Under the rear seat | 0.107° / 0.264° | 0.113° / 0.400° |
+| Middle of the floor (centre tunnel) | 0.093° / 0.233° | 0.102° / 0.344° |
+| Lower instrument panel | 0.094° / 0.273° | 0.113° / 0.415° |
+| In the headlamp / front end | 0.103° / 0.459° | 0.410° / 1.362° |
+| Above the rear axle | 0.119° / 0.460° | 0.205° / 0.688° |
+
+Inside the cabin the location hardly matters. A sensor misalignment of 0.15° or a bias drift of a
+few mg within a trip costs far more (0.08° and 0.04°), so the carrier's stiffness and temperature
+should decide. The recommendation is the centre tunnel near the centre of gravity.
 
 ## 10. Results (simulated test split)
 

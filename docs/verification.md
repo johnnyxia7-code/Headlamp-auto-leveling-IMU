@@ -61,7 +61,7 @@ Two definitions matter for reading the results:
 
 A scenario is a script of manoeuvres (`hold`, `to <speed> at <accel>`), a road
 (grade and curvature profiles, ISO 8608 roughness class), a load timeline, and
-optionally sensor faults. `verify/scenarios.py` holds 17 of them; adding one is a
+optionally sensor faults. `verify/scenarios.py` holds 18 of them; adding one is a
 function of about ten lines.
 
 The criteria and their default limits:
@@ -96,7 +96,7 @@ count the fault window too.
 Each scenario was run with four seeds. The seed draws the sensor errors (biases,
 mounting misalignment, noise), the camera bias and the road profile.
 
-**62 of 68 runs pass. 11 of the 17 scenarios pass with every seed; the other six
+**66 of 72 runs pass. 12 of the 18 scenarios pass with every seed; the other six
 each fail with one seed.**
 
 | Scenario | What it proves | Seeds passed | Steady-state aim error (MAE per seed) | Failed checks |
@@ -109,7 +109,8 @@ each fail with one seed.**
 | `unload_at_stop` | 2.2° step when the load is removed | 4/4 | 0.044° / 0.075° / 0.031° / 0.033° | – |
 | `sporty_driving` | lamp does not chase squat and dive | 4/4 | 0.037° / 0.067° / 0.064° / 0.068° | – |
 | `rough_road` | ISO 8608 class C road (relaxed limits) | 3/4 | 0.087° / 0.261° / 0.151° / 0.186° | convergence (seed 1); steady-state accuracy (seed 1) |
-| `curvy_road` | lateral dynamics do not leak into pitch | 4/4 | 0.130° / 0.110° / 0.001° / 0.122° | – |
+| `curvy_road` | lateral dynamics do not leak into pitch | 4/4 | 0.133° / 0.111° / 0.000° / 0.131° | – |
+| `urban_turns` | junction turns and roundabouts (yaw rate up to 25 °/s) are not read as load | 4/4 | 0.028° / 0.027° / 0.010° / 0.007° | – |
 | `soft_vehicle` | different vehicle, filter not retuned | 3/4 | 0.142° / 0.211° / 0.105° / 0.004° | convergence (seed 1); steady-state accuracy (seed 1); filter consistency (seed 1) |
 | `lever_arm_miscalibrated` | IMU position known only to 25 % | 4/4 | 0.135° / 0.137° / 0.075° / 0.104° | – |
 | `fault_wheel_speed_zero` | wheel speed reads 0 while driving | 3/4 | 0.103° / 0.126° / 0.090° / 0.082° | beam not raised during fault (seed 2) |
@@ -188,6 +189,9 @@ was wrong.
 - **IMU position.** Telling the filter a lever arm that is 25 % short
   (`lever_arm_miscalibrated`) still passes with all four seeds; the error grows
   by about 0.02°. Not telling it at all costs 0.2–0.5°.
+- **IMU location.** Six mounting locations are compared in
+  [`imu_mounting.md`](imu_mounting.md). Inside the cabin the location hardly
+  matters; alignment and temperature stability matter much more.
 - **Gyro loss.** Without the gyro the lever-arm term cannot be removed. Leveling
   continues with about 0.03° more error on the sedan (`fault_gyro_offset`).
   Predicting the term from the filter's own states was tried and was worse (0.5°).

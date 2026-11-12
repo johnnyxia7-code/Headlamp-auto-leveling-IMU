@@ -317,6 +317,14 @@ two can be compared.
   processed 40 ms late. Leaving the lever arm at zero for an IMU 0.9 m ahead of
   the axis biased the load pitch by 0.2–0.5° on the verification plant; see
   [`verification.md`](verification.md), findings 1 and 2.
+- **Turning.** Set `imu_rear_axle_x_m` to the IMU's distance ahead of the rear
+  axle and `rear_slip_rad_per_ms2` to the vehicle's rear side-slip gradient. The
+  wheel speed is the forward speed at the rear axle, so in a turn the longitudinal
+  accelerometer also sees `a_lat · slip angle − distance · yaw rate²`. Both terms
+  have the same sign in left and right turns. The filter removes them with the yaw
+  gyro and adds 30 % of the correction (`turn_comp_rel_std`) to the acc_x noise.
+  Without a yaw rate they stay in. Location comparison:
+  [`imu_mounting.md`](imu_mounting.md).
 - **Single precision.** `P` spans about 12 orders of magnitude (wheel scale versus
   grade rate). Options:
   - Scale the states to similar magnitudes: degrees and milli-g as units.
