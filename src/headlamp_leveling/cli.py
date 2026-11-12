@@ -72,6 +72,17 @@ def _cmd_verify(a) -> None:
         sys.exit(1)
 
 
+def _cmd_mount_study(a) -> None:
+    from .verify.mounting import LOCATIONS, mounting_study
+    if a.list:
+        for name, loc in LOCATIONS.items():
+            print(f"{name:18s} {loc.title}: {loc.behind_front_axle_m:+.2f} m behind the front axle, "
+                  f"{loc.height_m:.2f} m high ({loc.carrier})")
+        return
+    mounting_study(load_config(a.config), a.locations or None, a.scenario or None, a.seeds, a.out,
+                   sensitivity=not a.no_sensitivity, plots=not a.no_plots)
+
+
 def _cmd_simulate(a) -> None:
     import numpy as np
     from .sim.scenario import simulate_trip
@@ -147,6 +158,17 @@ def main(argv: Optional[List[str]] = None) -> None:
     v.add_argument("--seeds", type=int, default=1, help="number of seeds to run each scenario with")
     v.add_argument("--strict", action="store_true", help="exit with status 1 if any scenario fails")
     v.set_defaults(func=_cmd_verify)
+
+    m = sub.add_parser("mount-study", help="compare IMU mounting locations on the half-car plant")
+    m.add_argument("-c", "--config", default=None)
+    m.add_argument("-o", "--out", default="runs/mounting")
+    m.add_argument("--locations", nargs="*", default=None, help="location names (default: all)")
+    m.add_argument("--scenario", nargs="*", default=None, help="verification scenarios to drive (default: 8)")
+    m.add_argument("--seeds", type=int, default=4)
+    m.add_argument("--list", action="store_true", help="list the locations and exit")
+    m.add_argument("--no-sensitivity", action="store_true", help="skip the vibration / misalignment / drift sweep")
+    m.add_argument("--no-plots", action="store_true")
+    m.set_defaults(func=_cmd_mount_study)
 
     s = sub.add_parser("simulate", help="simulate one trip and print its scenario")
     s.add_argument("-c", "--config", default=None)

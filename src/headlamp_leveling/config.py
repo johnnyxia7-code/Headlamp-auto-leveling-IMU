@@ -153,6 +153,12 @@ class FusionConfig:
     # acceleration times this lever arm appears in the accelerometer and is removed.
     imu_lever_x_m: float = 0.0             # forward of the pitch axis
     imu_lever_z_m: float = 0.0             # above the pitch axis
+    # Turning. With the wheel speed taken at the rear axle, the longitudinal accelerometer
+    # also sees  a_lat * alpha_r - yaw_rate^2 * d : rear side-slip and the centripetal term of
+    # the IMU's distance d ahead of the rear axle. Both are removed with the yaw gyro.
+    imu_rear_axle_x_m: float = 0.0         # IMU ahead of the rear axle (installation data)
+    rear_slip_rad_per_ms2: float = 0.0     # rear side-slip angle per lateral acceleration (vehicle data)
+    turn_comp_rel_std: float = 0.3         # relative uncertainty of that correction (added to R of acc_x)
     # Initial uncertainty (1 sigma).
     init_load_pitch_deg: float = 0.0
     init_load_pitch_std_deg: float = 1.0

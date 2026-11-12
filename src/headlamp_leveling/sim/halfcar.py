@@ -13,6 +13,8 @@ crime". This plant is built from the mechanics instead:
       with different anti-dive (braking) and anti-squat (traction) geometry
     * road roughness enters at the front axle and, one wheelbase later, the rear
     * vertical road curvature (crests / dips) and an IMU lever arm
+    * in curves: the IMU's distance from the rear axle (centripetal term) and the
+      rear tyres' side-slip, both of which appear in the longitudinal accelerometer
     * integrated at 1 kHz; sensors sample at 100 Hz
 
 Frames: the plant works in a road-aligned frame at the vehicle position (x along
@@ -56,6 +58,7 @@ class HalfCarParams:
     anti_dive: float = 0.5         # share of braking load transfer carried by the links
     anti_squat: float = 0.3        # same for traction
     roll_gradient_deg_per_g: float = 4.5
+    c_alpha_r: float = 110e3       # rear axle cornering stiffness (both tyres), N/rad
     x_imu: float = 0.9             # IMU position forward of the CG, m
     z_imu: float = -0.1            # IMU position above the CG, m
     # Load positions behind the front axle, m.
@@ -75,6 +78,14 @@ class HalfCarParams:
     @property
     def pitch_freq_hz(self) -> float:
         return math.sqrt(self.pitch_stiffness / self.i_y) / (2.0 * math.pi)
+
+    def rear_slip_gradient(self, s0: float = 0.0, s1: float = 0.0) -> float:
+        """Rear-axle side-slip angle per unit lateral acceleration, rad / (m/s^2).
+
+        ``s0`` / ``s1`` are the load sums (mass, mass * position forward of the CG).
+        """
+        m_rear = (self.m_s * self.a + s0 * self.a - s1) / self.wheelbase + self.m_ur
+        return m_rear / self.c_alpha_r
 
     def pitch_gradient_deg_per_g(self, braking: bool = False) -> float:
         eta = self.anti_dive if braking else self.anti_squat
@@ -338,12 +349,25 @@ def simulate_scripted(drive: ScriptedDrive, cfg: Config, seed: int = 0, ideal_se
     zdd_imu, thdd_s, om_s, th_s = out[:, 0], out[:, 1], out[:, 2], out[:, 3]
     a_lat = v_s * v_s * k_s
     roll = -np.deg2rad(p.roll_gradient_deg_per_g) / G * a_lat
+    # Turning. The wheel speed is the forward speed u of the rear axle. In the body frame
+    # the longitudinal acceleration of a point is du/dt - r * v_y, with v_y its lateral
+    # velocity. The rear axle slips sideways by the angle alpha_r (v_y = -u alpha_r), and a
+    # point d ahead of it adds r * d. So the IMU sees  a_lat * alpha_r - r^2 d  on top of
+    # du/dt: the first term is the same everywhere in the car, the second grows with the
+    # distance from the rear axle. Both are quasi-steady (single-track model).
+    yaw = v_s * k_s
+    d_ra = p.x_imu + p.b
+    idx_s = np.arange(sub - 1, n, sub)
+    s_s = S[idx_s]
+    alpha_r = p.rear_slip_gradient(s_s[:, 0], s_s[:, 1]) * a_lat
+    a_turn = a_lat * alpha_r - yaw * yaw * d_ra
+    a_lat_imu = a_lat + np.gradient(yaw, 1.0 / fs) * d_ra
     # Specific force in the road frame at the IMU, then rotated into the body frame.
-    f_rx = a_s + G * np.sin(g_s) - p.z_imu * thdd_s
+    f_rx = a_s + G * np.sin(g_s) - p.z_imu * thdd_s + a_turn
     f_rz = zdd_imu + v_s * gr_s + G * np.cos(g_s) * np.cos(roll)
     f_body = np.stack([
         f_rx * np.cos(th_s) + f_rz * np.sin(th_s),
-        a_lat * np.cos(roll) + G * np.sin(roll),
+        a_lat_imu * np.cos(roll) + G * np.sin(roll),
         -f_rx * np.sin(th_s) + f_rz * np.cos(th_s),
     ], axis=1)
     w_body = np.rad2deg(np.stack([np.gradient(roll, 1.0 / fs), -(gr_s + om_s), v_s * k_s], axis=1))
@@ -354,7 +378,7 @@ def simulate_scripted(drive: ScriptedDrive, cfg: Config, seed: int = 0, ideal_se
         imu = imu_measurements(rng, cfg.imu, fs, f_body, w_body, v_s)
         v_wheel = wheel_speed_measurement(rng, cfg.imu, v_s, a_s)
         inputs = np.concatenate([imu, v_wheel[:, None]], axis=1)
-    idx = np.arange(sub - 1, n, sub)
+    idx = idx_s
     gamma_ahead = np.interp(s_mid[idx] + cfg.camera.lookahead_m, s_grid, gamma_grid)
     cam, cam_bias = camera_pitch_measurements(rng, cfg.camera, fs, th_s, g_s, gamma_ahead, v_s)
 

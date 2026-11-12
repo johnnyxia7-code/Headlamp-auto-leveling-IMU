@@ -239,6 +239,7 @@ class PitchEKF:
         self._gyro_gap_s = 0.0
         self._monitor_holdoff_s = 0.0
         self._delay: Deque[tuple] = deque(maxlen=5)
+        self._turn_var = 0.0
         self._gate_run = {s: 0 for s in CRITICAL_SENSORS}
 
     def _initialize(self, ax: float, az: float) -> None:
@@ -397,7 +398,7 @@ class PitchEKF:
         c = self.cfg
         if np.isfinite(ax):
             h, H = h_acc_x(self.x)
-            self.update_scalar("acc_x", ax, h, H, self._r(0), c.gate_imu, huber=True)
+            self.update_scalar("acc_x", ax, h, H, self._r(0) + self._turn_var, c.gate_imu, huber=True)
         if np.isfinite(az):
             h, H = h_acc_z(self.x, self.roll)        # re-linearised after the x update
             self.update_scalar("acc_z", az, h, H, self._r(1), c.gate_imu, huber=True)
@@ -558,7 +559,7 @@ class PitchEKF:
         c = self.cfg
         sample = (ax, az, gy_dps, v_wheel, camera_pitch_deg, ay, gz_dps)
         if c.imu_lever_x_m == 0.0 and c.imu_lever_z_m == 0.0:
-            return sample
+            return self._remove_turn_terms(sample)
         self._delay.append(sample)
         if len(self._delay) < 5:
             return None
@@ -572,8 +573,35 @@ class PitchEKF:
             # the verification plant): those states are poorly known without the gyro,
             # and feeding them back into the measurement closes a loop.
             thdd = 0.0
-        return (ax + c.imu_lever_z_m * thdd, az - c.imu_lever_x_m * thdd, gy_c, v_wheel, camera_pitch_deg,
-                ay, gz_dps)
+        return self._remove_turn_terms((ax + c.imu_lever_z_m * thdd, az - c.imu_lever_x_m * thdd, gy_c, v_wheel,
+                                        camera_pitch_deg, ay, gz_dps))
+
+    def _remove_turn_terms(self, sample: tuple) -> tuple:
+        """Remove what turning adds to the longitudinal accelerometer.
+
+        The wheel speed is the forward speed at the rear axle. An IMU ``d`` ahead of
+        that axle sees ``-yaw_rate^2 * d`` (centripetal), and everywhere in the car the
+        rear tyres' side-slip adds ``a_lat * alpha_r``. In a junction turn (15 m radius,
+        22 km/h) the first term is 0.4 m/s^2 for an IMU 2.4 m ahead of the rear axle,
+        which reads as 2.3 deg of pitch while it lasts. Both terms always have the same
+        sign for left and right turns, so they do not average out.
+
+        The correction needs the yaw gyro and the wheel speed; without them the terms
+        stay in (degraded mode). Its uncertainty is added to the acc_x noise, so the
+        filter trusts the longitudinal accelerometer less while turning.
+        """
+        c = self.cfg
+        ax, az, gy, v_wheel, cam, ay, gz_dps = sample
+        self._turn_var = 0.0
+        if (c.imu_rear_axle_x_m == 0.0 and c.rear_slip_rad_per_ms2 == 0.0) or not (
+                np.isfinite(ax) and np.isfinite(gz_dps) and np.isfinite(v_wheel)):
+            return sample
+        yaw = gz_dps * D2R
+        a_lat = v_wheel * yaw
+        centripetal = yaw * yaw * c.imu_rear_axle_x_m
+        slip = c.rear_slip_rad_per_ms2 * a_lat * a_lat
+        self._turn_var = (c.turn_comp_rel_std * (abs(centripetal) + slip)) ** 2
+        return (ax + centripetal - slip, az, gy, v_wheel, cam, ay, gz_dps)
 
     # ------------------------------------------------------------ resilience
     def _reopen(self, idx: int, sd: float) -> None:

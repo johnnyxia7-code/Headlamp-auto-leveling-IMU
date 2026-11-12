@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
+
 from ..sim.halfcar import HalfCarParams, ScriptedDrive, speed_profile
 from .criteria import (ActuatorTravel, AimWithin, BeamNotRaised, Consistent, Converges, Criterion, FaultDetected, LampQuiet,
                        LevelingContinues, LoadStepTracked, NoFailsafe, NoGlare, NumericallySound, Recovers,
@@ -58,6 +60,14 @@ class Script:
         out = {n: (s, e) for n, s, e in zip(self.names, starts, ends) if n}
         out["_end"] = (ends[-1], ends[-1])
         return out
+
+    def distances(self) -> Dict[str, Tuple[float, float]]:
+        """Distance travelled (m) at the start and end of each named step."""
+        dt = 1e-3
+        _, v = speed_profile(self.manoeuvres, dt, self.jerk)
+        s = np.concatenate([[0.0], np.cumsum(v) * dt])
+        return {n: (float(s[min(int(t0 / dt), s.size - 1)]), float(s[min(int(t1 / dt), s.size - 1)]))
+                for n, (t0, t1) in self.times().items()}
 
 
 def _city(s: Optional[Script] = None) -> Script:
@@ -193,6 +203,31 @@ def curvy_road() -> VerifyScenario:
         ScriptedDrive(s.manoeuvres, curvature=curv, loads=[(0.0, "trunk_heavy")], roughness="B"), _nominal())
 
 
+def urban_turns() -> VerifyScenario:
+    s = Script().hold(15, "start").to(40, 2.0).hold(8)
+    radii = {}
+    for i, (kmh, radius, secs) in enumerate([(22, 15, 9), (25, -20, 12), (20, -13, 8), (22, 15, 9), (28, 25, 14),
+                                             (20, -13, 8)]):
+        s.to(kmh, 2.0).hold(secs, f"turn{i}").to(50 if i % 2 else 60, 2.0).hold(10)
+        radii[f"turn{i}"] = radius
+        if i == 2:
+            s.to(0, 2.5).hold(8, "stop")
+    s.to(0, 2.5).hold(5)
+    d = s.distances()
+    curv = [(0.0, 0.0)]
+    for name, radius in radii.items():
+        d0, d1 = d[name]
+        # The curve starts while still braking and ends while already accelerating.
+        curv += [(d0 - 12.0, 0.0), (d0 - 2.0, 1.0 / radius), (d1 + 6.0, 1.0 / radius), (d1 + 16.0, 0.0)]
+    return VerifyScenario(
+        "urban_turns", "City drive with junction turns and roundabouts (13 to 25 m radius)",
+        "Tight turns at low speed. The yaw rate reaches 25 °/s, so the centripetal acceleration at the "
+        "IMU (its distance from the rear axle times the yaw rate squared) and the rear tyres' side-slip "
+        "appear in the longitudinal accelerometer, always with the same sign. The turns overlap with "
+        "braking and accelerating. None of that may be read as load.",
+        ScriptedDrive(s.manoeuvres, curvature=curv, loads=[(0.0, "full_cabin_trunk")]), _nominal())
+
+
 def soft_vehicle() -> VerifyScenario:
     s = _city()
     veh = HalfCarParams(k_f=33e3, k_r=36e3, c_f=2.6e3, c_r=2.8e3, h=0.68, anti_dive=0.3, anti_squat=0.1,
@@ -289,6 +324,6 @@ def fault_camera_wrong() -> VerifyScenario:
 
 SCENARIOS: Dict[str, Callable[[], VerifyScenario]] = {f.__name__: f for f in (
     city_loaded, city_no_camera, motorway_cruise, hill_route, parked_on_slope_loading, unload_at_stop,
-    sporty_driving, rough_road, curvy_road, soft_vehicle, lever_arm_miscalibrated,
+    sporty_driving, rough_road, curvy_road, urban_turns, soft_vehicle, lever_arm_miscalibrated,
     fault_wheel_speed_zero, fault_imu_outage, fault_accel_z_frozen, fault_gyro_offset, fault_glitches,
     fault_camera_wrong)}

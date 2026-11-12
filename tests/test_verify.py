@@ -157,3 +157,57 @@ def test_scenario_runs_and_passes(name):
     r = run_scenario(SCENARIOS[name](), Config())
     failed = [f"{c.name}: {c.measured}" for c in r["checks"] if not c.passed]
     assert r["passed"], failed
+
+
+# ----------------------------------------------------------------- turning and IMU location
+
+def _steady_turn(x_imu: float, radius: float = 20.0):
+    p = HalfCarParams(x_imu=x_imu)
+    drive = ScriptedDrive([("hold", 1), ("to", 25, 2.0), ("hold", 25)], curvature=[(0, 0), (40, 1 / radius), (400, 1 / radius)],
+                          roughness=None, vehicle=p)
+    raw = simulate_scripted(drive, Config(), ideal_sensors=True)
+    sl = slice(-500, None)                                           # last 5 s: steady circle at constant speed
+    return p, raw["inputs"][sl], raw["speed_ms"][sl]
+
+
+def test_plant_turning_terms_depend_on_the_distance_from_the_rear_axle():
+    p, at_axle, v = _steady_turn(x_imu=-HalfCarParams().b)          # IMU on the rear axle
+    _, ahead, _ = _steady_turn(x_imu=0.9)
+    yaw = np.deg2rad(at_axle[:, 5]).mean()
+    a_lat = float(v.mean()) * yaw
+    assert yaw == pytest.approx(v.mean() / 20.0, rel=1e-3)
+    # On the rear axle only the side-slip term is left; it does not depend on the turn direction.
+    assert at_axle[:, 0].mean() == pytest.approx(p.rear_slip_gradient() * a_lat ** 2, rel=0.03)
+    # 2.4 m further forward the centripetal term is added.
+    assert (ahead[:, 0] - at_axle[:, 0]).mean() == pytest.approx(-yaw ** 2 * (0.9 + p.b), rel=0.02)
+
+
+def test_filter_removes_the_turning_terms():
+    cfg = FusionConfig(imu_rear_axle_x_m=2.4, rear_slip_rad_per_ms2=0.007)
+    ekf = PitchEKF(cfg)
+    v, yaw_dps = 6.0, 20.0
+    yaw = np.deg2rad(yaw_dps)
+    ax_in = 0.007 * (v * yaw) ** 2 - yaw ** 2 * 2.4                 # what the plant adds for this turn
+    ax, az, *_ = ekf._remove_turn_terms((ax_in, 9.81, 0.0, v, float("nan"), 0.0, yaw_dps))
+    assert ax == pytest.approx(0.0, abs=1e-9) and az == 9.81
+    assert ekf._turn_var > 0.0                                       # acc_x is trusted less while turning
+    # Without a yaw rate nothing is changed.
+    assert ekf._remove_turn_terms((ax_in, 9.81, 0.0, v, float("nan"), 0.0, float("nan")))[0] == ax_in
+    assert ekf._turn_var == 0.0
+
+
+def test_mounting_study_runs(tmp_path):
+    from headlamp_leveling.verify.mounting import LOCATIONS, mounting_study
+    veh = HalfCarParams()
+    x, z = LOCATIONS["overhead_console"].lever(veh)
+    assert abs(x) < 0.3 and z > 0.5                                  # roughly above the CG, high up
+    rep = mounting_study(Config(), ["floor_centre", "headlamp"], ["urban_turns"], n_seeds=1, out_dir=str(tmp_path),
+                         sensitivity=False, plots=False, workers=1, verbose=False)
+    assert [e["name"] for e in rep["locations"]] == ["floor_centre", "headlamp"]
+    assert rep["locations"][0]["variants"]["known"]["runs"] == 1
+    assert (tmp_path / "report.md").read_text().startswith("# IMU mounting-location study")
+    # A second call reuses the stored runs.
+    assert len((tmp_path / "runs.jsonl").read_text().splitlines()) == 6
+    mounting_study(Config(), ["floor_centre", "headlamp"], ["urban_turns"], n_seeds=1, out_dir=str(tmp_path),
+                   sensitivity=False, plots=False, workers=1, verbose=False)
+    assert len((tmp_path / "runs.jsonl").read_text().splitlines()) == 6

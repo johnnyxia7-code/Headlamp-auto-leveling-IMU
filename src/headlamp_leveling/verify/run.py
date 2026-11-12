@@ -32,8 +32,13 @@ def run_scenario(sc: VerifyScenario, cfg: Config, seed: int = 0) -> Dict:
     # The IMU position is installation data: the filter is given the plant's lever arm
     # (optionally with a calibration error).
     cfg = copy.deepcopy(cfg)
-    cfg.fusion.imu_lever_x_m = sc.drive.vehicle.x_imu * sc.lever_arm_scale
-    cfg.fusion.imu_lever_z_m = sc.drive.vehicle.z_imu * sc.lever_arm_scale
+    veh = sc.drive.vehicle
+    cfg.fusion.imu_lever_x_m = veh.x_imu * sc.lever_arm_scale
+    cfg.fusion.imu_lever_z_m = veh.z_imu * sc.lever_arm_scale
+    cfg.fusion.imu_rear_axle_x_m = (veh.x_imu + veh.b) * sc.lever_arm_scale
+    # Vehicle data, not installation data: the filter knows the side-slip gradient of the
+    # unladen car. The plant's true value follows the load (up to 30 % more).
+    cfg.fusion.rear_slip_rad_per_ms2 = veh.rear_slip_gradient()
     res = run_ekf(raw, cfg, use_camera=sc.use_camera, guard=True)
     cl = closed_loop_series(res, cfg)
     n_est = res["load_pitch_deg"].size
